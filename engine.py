@@ -1,5 +1,5 @@
 from __future__ import annotations
-import collections, hashlib, io, json, os, re, shutil, stat, tempfile, threading, unicodedata, zipfile
+import collections, csv, hashlib, io, json, os, re, shutil, stat, tempfile, threading, unicodedata, zipfile
 from pathlib import Path, PurePosixPath
 from datetime import datetime
 from xml.sax.saxutils import escape
@@ -360,8 +360,23 @@ def report(run):
         if len({r['source'] for r in rs})>1:
             for r in rs:
                 cross.append([full(r) if r['source']==SOURCES[0] else '',full(r) if r['source']==SOURCES[1] else '',full(r) if r['source']==SOURCES[2] else '',r['title'],r['season'],r['episode'],'동일' if r['sha']==winner['sha'] else '다름','동일' if r['signature'] and r['signature']==winner['signature'] else '해당 없음',r['uploader'],'확정 교차 중복','삭제' if r['actual'] else ('삭제 후보' if r['delete'] else '대표본 보존'),gid])
+    # Extension audit intentionally includes every extracted leaf, not only known subtitle types.
+    extension_groups=collections.defaultdict(list)
+    for r in records:
+        ext=Path(r['name']).suffix.lower() or '(없음)'
+        extension_groups[ext].append(r)
+    extension_rows=[['확장자','파일 수','총 용량(Bytes)','총 용량(MiB)','소스별 파일 수','예시 경로(최대 5개)']]
+    for ext,rs in sorted(extension_groups.items(), key=lambda x:(x[0]=='(없음)',x[0])):
+        by_source=', '.join(f'{source}: {sum(r["source"]==source for r in rs):,}' for source in SOURCES if any(r['source']==source for r in rs))
+        examples='\n'.join(full(r) for r in rs[:5])
+        extension_rows.append([ext,len(rs),sum(r['size'] for r in rs),round(sum(r['size'] for r in rs)/1024**2,3),by_source,examples])
+    summary += [['발견 확장자 종류 수',len(extension_groups)],['확장자 조사','모든 재귀 해제 파일 포함. 삭제/필터링 전 조사 결과']]
+    csv_path=Path(run['run'])/'extension_inventory.csv'
+    with open(csv_path,'w',encoding='utf-8-sig',newline='') as f:
+        w=csv.writer(f)
+        w.writerows(extension_rows)
     # Long path groups are row-based so no group list is silently truncated in a cell.
-    sheets=[('요약',summary),('삭제내역',deleted),('보존파일',kept),('검토필요',reviews),('오배치',misplaced),('공용첨부',shared),('교차비교',cross)]
+    sheets=[('요약',summary),('확장자조사',extension_rows),('삭제내역',deleted),('보존파일',kept),('검토필요',reviews),('오배치',misplaced),('공용첨부',shared),('교차비교',cross)]
     if run.get('version')==2:
         sheets.append(('ZIP재구성',[['원래 ZIP 경로','처리 결과']]+[[x['path'],x['result']] for x in run.get('containers',[])]))
     tmp=Path(run['run'])/'subtitle_cleanup_report.tmp.xlsx'; xlsx(tmp,sheets);tmp.replace(Path(run['run'])/'subtitle_cleanup_report.xlsx')
