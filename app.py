@@ -28,7 +28,7 @@ class App(tk.Tk):
         ttk.Checkbutton(panel,text='소스 사이의 확정 중복도 대표본 하나만 남김',variable=self.cross).pack(anchor='w')
         ttk.Label(panel,text='해제본은 expanded/소스/작품명/ 바로 아래에 모입니다. 같은 이름은 __2 식으로 보존하고, 모든 확장자를 조사합니다.').pack(anchor='w',pady=5)
         actions=ttk.Frame(panel);actions.pack(fill='x',pady=6)
-        for label,fn in [('전체 압축 해제·확장자 조사',self.analyze),('무확장자 형식 판별',self.detect_extensionless),('선택 확장자 적용·중복 정리',self.choose_extensions_and_clean),('작업 불러오기',self.load),('원래 구조 복원',self.restore),('결과 열기',self.open_output)]:
+        for label,fn in [('전체 압축 해제·확장자 조사',self.analyze),('무확장자 형식 판별',self.detect_extensionless),('남은 압축파일 해제',self.extract_remaining_archives),('선택 확장자 적용·중복 정리',self.choose_extensions_and_clean),('작업 불러오기',self.load),('원래 구조 복원',self.restore),('결과 열기',self.open_output)]:
             b=ttk.Button(actions,text=label,command=fn);b.pack(side='left',padx=3);self.controls.append(b)
         ttk.Button(actions,text='중지',command=self.stop.set).pack(side='right')
         self.bar=ttk.Progressbar(panel,mode='indeterminate');self.bar.pack(fill='x',pady=4)
@@ -82,6 +82,28 @@ class App(tk.Tk):
         if messagebox.askyesno('무확장자 형식 판별',f'확장자 없는 파일 {n:,}개만 검사합니다.\n\n자막 형식뿐 아니라 ZIP/7z/RAR/EGG/ALZ 등 압축 형식과 흔한 이미지·폰트·PDF도 시그니처로 판별합니다.\n유효한 ZIP은 같은 작품 폴더에 바로 재귀 해제하고, 다른 압축 형식은 확장자만 붙여 보존합니다.\n\n전체 원본 재스캔은 하지 않습니다.'):
             self.worker(lambda e:e.detect_extensionless(self.run_data))
 
+    def extract_remaining_archives(self):
+        if not self.run_data or self.run_data.get('state')!='분석 완료':
+            messagebox.showinfo('압축 해제','먼저 전체 압축 해제·확장자 조사를 완료하거나 작업을 불러오세요.')
+            return
+        probe=Engine()
+        candidates=probe.remaining_archive_candidates(self.run_data)
+        if not candidates:
+            messagebox.showinfo('압축 해제','해제할 RAR/7z/EGG/ALZ가 없습니다. 폰트 압축과 분할 ZIP(.z01 등)은 제외합니다.')
+            return
+        bz=probe.find_bandizip()
+        if not bz:
+            bz=filedialog.askopenfilename(title='Bandizip bz.exe 선택',filetypes=[('Bandizip console','bz.exe'),('실행 파일','*.exe')])
+            if not bz:return
+        if not messagebox.askyesno(
+            '남은 압축파일 해제',
+            f'RAR/7z/EGG/ALZ {len(candidates):,}개를 Bandizip으로 검사·해제합니다.\n\n'
+            '폰트/font 이름의 압축과 .z01 같은 분할 ZIP은 건드리지 않습니다.\n'
+            '내용은 같은 작품 폴더 바로 아래로 평탄화하고 이름 충돌은 __2 식으로 보존하며, 새 파일을 manifest/SHA에 추가합니다.\n'
+            '압축 원본 자체는 지우지 않습니다.'
+        ):return
+        self.worker(lambda e:e.extract_remaining_archives(self.run_data,bz))
+
     def choose_extensions_and_clean(self):
         if not self.run_data or self.run_data.get('state')!='분석 완료':
             messagebox.showinfo('정리','먼저 전체 압축 해제·확장자 조사를 완료하거나 작업을 불러오세요.')
@@ -109,9 +131,24 @@ class App(tk.Tk):
         sb=ttk.Scrollbar(frame,orient='vertical',command=lb.yview);lb.configure(yscrollcommand=sb.set)
         lb.pack(side='left',fill='both',expand=True);sb.pack(side='right',fill='y')
         defaults=set(SUBS)-{'.txt'}
-        # Unresolved archives are selected by default so cleanup cannot silently delete them.
+        # Keep only genuinely unresolved archives selected by default. Successfully extracted
+        # archives and intentionally skipped font bundles can be removed with the other extras.
         archive_exts={'.zip','.7z','.rar','.egg','.alz','.gz','.bz2','.xz','.tar'}
-        defaults |= {ext for ext in exts if ext in archive_exts or __import__('re').fullmatch(r'\.z\d\d',ext)}
+        for ext in exts:
+            if ext not in archive_exts and not __import__('re').fullmatch(r'\.z\d\d',ext):continue
+            rs=[r for r in records if (Path(r['name']).suffix.lower() or '(없음)')==ext]
+            unresolved=False
+            for r in rs:
+                font=bool(__import__('re').search(r'폰트|fonts?',r.get('name',''),__import__('re').I))
+                if ext=='.zip':
+                    unresolved |= not r.get('archive_extracted') and not font
+                elif ext in {'.7z','.rar','.egg','.alz'}:
+                    unresolved |= not r.get('external_archive_extracted') and not font
+                elif __import__('re').fullmatch(r'\.z\d\d',ext):
+                    unresolved |= not font
+                else:
+                    unresolved=True
+            if unresolved:defaults.add(ext)
         for i,ext in enumerate(exts):
             lb.insert('end',f'{ext:<10} {counts[ext]:>8,}개')
             if ext in defaults:lb.selection_set(i)
