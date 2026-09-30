@@ -159,7 +159,7 @@ class Engine:
                     if (i+1) % 100 == 0: self.log(f'{source}: {i+1:,}/{len(files):,}개 해시 완료')
                 # Calculate archive payload once per raw SHA; do not repeatedly open identical ZIPs.
                 cache = {}
-                for r in [r for r in run['records'] if r['source'] == source and r['name'].lower().endswith('.zip')]:
+                for r in [r for r in run['records'] if not getattr(self, 'deep_mode', False) and r['source'] == source and r['name'].lower().endswith('.zip')]:
                     self.check()
                     if r['sha'] not in cache:
                         try: cache[r['sha']] = (*payload_signature(target / r['rel'], self.check), '')
@@ -202,12 +202,19 @@ class Engine:
         reviewed = set()
         for name, members in candidates.items():
             if not name or len({r['signature'] or r['sha'] for r in members}) < 2: continue
+            # Review only alternatives of the same work where a work is known.
+            # Repeated generic names (01.smi, font.ttf) across unrelated works are not similarity evidence.
+            by_work = collections.defaultdict(list)
+            for m in members: by_work[normal(m['title']) or m['source']+'/'+m['rel']].append(m)
             for r in members:
                 if not r['delete']:
                     if (r['source'],r['rel']) in reviewed: continue
+                    alternatives=by_work[normal(r['title']) or r['source']+'/'+r['rel']]
+                    distinct={m['sha']: m for m in alternatives if m['sha']!=r['sha']}
+                    if not distinct: continue
                     reviewed.add((r['source'],r['rel']))
                     run['reviews'].append({'path': r['source']+'/'+r['rel'], 'reason': '파일명 유사·내용 다름',
-                        'sha': r['sha'], 'others': [m['source']+'/'+m['rel'] for m in members if m is not r], 'result': '수정판·릴·번역자 차이 가능: 보존'})
+                        'sha': r['sha'], 'others': [m['source']+'/'+m['rel'] for m in distinct.values()], 'result': '수정판·릴·번역자 차이 가능: 보존'})
         for r in run['records']:
             if r['error']:
                 run['reviews'].append({'path': r['source']+'/'+r['rel'], 'reason': r['error'], 'sha': r['sha'], 'others': [], 'result': '내부 검증 불가: 보존'})
@@ -322,6 +329,15 @@ def report(run):
         rs=[r for r in records if r['source']==source]; keep=[r for r in rs if not r['actual']]
         summary += [[source+' 원본 파일 수',len(rs)],[source+' 원본 용량(Bytes)',sum(r['size'] for r in rs)], [source+' 현재 파일 수',len(keep)],[source+' 현재 용량(Bytes)',sum(r['size'] for r in keep)]]
     summary += [['확정 중복 그룹 수',len(groups)],['확정 중복 삭제 후보',sum(r['delete'] for r in records)],['실제 삭제 파일 수',sum(r['actual'] for r in records)],['총 절약 용량(Bytes)',sum(r['size'] for r in records if r['actual'])],['검토 필요 수',len(run.get('reviews',[]))],['교차 중복 그룹 수',sum(len({r['source'] for r in rs})>1 for rs in groups.values())],['오배치 자동 삭제','하지 않음: 제목만으로 타 작품을 단정하지 않음'],['원본 보존','입력 폴더·ZIP을 수정하지 않음'],['ZIP 비교 기준','모든 내부 파일의 SHA-256·크기·중복 개수 비교. 파일명은 무시. 부가 파일도 포함.']]
+    if run.get('version')==2:
+        summary[-1]=['ZIP 비교 기준','내부 ZIP 재귀 해제 후 개별 파일 SHA-256 비교. 부분 중복도 제거. 싱크·문자·인코딩 차이는 보존.']
+        summary += [['파일 수·용량 기준','개별 해제 파일 기준. 검증 불가 ZIP은 보존된 ZIP 자체 크기로 계산.'],['절약 용량 기준','최종 결과에서 제거된 개별 파일의 비압축 바이트. 원본·복구용 복사본 보존으로 디스크 사용량 감소를 뜻하지 않음.']]
+        for source in SOURCES:
+            orig=[r for r in run.get('top_records',[]) if r['source']==source]
+            folder=Path(run['run'])/'cleaned'/source
+            summary += [[source+' 원래 상위 파일 수',len(orig)],[source+' 원래 상위 용량(Bytes)',sum(r['size'] for r in orig)],
+                        [source+' 결과 상위 파일 수',sum(p.is_file() for p in folder.rglob('*')) if folder.exists() else 0],
+                        [source+' 결과 실제 용량(Bytes)',sum(p.stat().st_size for p in folder.rglob('*') if p.is_file()) if folder.exists() else 0]]
     deleted=[['소스','원래 전체 경로','작업 경로','파일명','크기(Bytes)','크기(MiB)','SHA-256','분류','삭제 사유','보존된 대표 파일 경로','중복 그룹 ID','실제 삭제 여부']]
     kept=[['소스','최종 경로','파일명','크기(Bytes)','SHA-256','작품명','회차','업로더/번역자/릴','보존 사유','중복 그룹 ID']]
     misplaced=[['소스','현재 작품','현재 회차','원래 경로','파일명','추정 작품','판단 근거','처리 결과']]
@@ -346,4 +362,6 @@ def report(run):
                 cross.append([full(r) if r['source']==SOURCES[0] else '',full(r) if r['source']==SOURCES[1] else '',full(r) if r['source']==SOURCES[2] else '',r['title'],r['season'],r['episode'],'동일' if r['sha']==winner['sha'] else '다름','동일' if r['signature'] and r['signature']==winner['signature'] else '해당 없음',r['uploader'],'확정 교차 중복','삭제' if r['actual'] else ('삭제 후보' if r['delete'] else '대표본 보존'),gid])
     # Long path groups are row-based so no group list is silently truncated in a cell.
     sheets=[('요약',summary),('삭제내역',deleted),('보존파일',kept),('검토필요',reviews),('오배치',misplaced),('공용첨부',shared),('교차비교',cross)]
+    if run.get('version')==2:
+        sheets.append(('ZIP재구성',[['원래 ZIP 경로','처리 결과']]+[[x['path'],x['result']] for x in run.get('containers',[])]))
     tmp=Path(run['run'])/'subtitle_cleanup_report.tmp.xlsx'; xlsx(tmp,sheets);tmp.replace(Path(run['run'])/'subtitle_cleanup_report.xlsx')
