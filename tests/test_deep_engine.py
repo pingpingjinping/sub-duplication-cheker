@@ -443,4 +443,26 @@ class DeepTests(unittest.TestCase):
         self.assertEqual(r['original_name_recovery_archive_stats']['errors'],0)
 
 
+    def test_flat_cleanup_ignores_changed_unselected_attachment(self):
+        self.put(self.a,'작품/pack.zip',zb([
+            ('01.smi',b'subtitle'),
+            ('font.ttf',b'original-font')
+        ]))
+        r=self.run_analysis()
+        folder=Path(r['run'])/'expanded'/SOURCES[0]/'작품'
+        (folder/'font.ttf').write_bytes(b'changed-font')
+        self.e.clean_flat(r,{'.smi'})
+        self.assertTrue((folder/'01.smi').exists())
+        self.assertFalse((folder/'font.ttf').exists())
+        self.assertEqual(r['state'],'정리 완료')
+
+    def test_flat_cleanup_still_rejects_changed_selected_file(self):
+        self.put(self.a,'작품/pack.zip',zb([('01.smi',b'original-subtitle')]))
+        r=self.run_analysis()
+        folder=Path(r['run'])/'expanded'/SOURCES[0]/'작품'
+        (folder/'01.smi').write_bytes(b'changed-subtitle')
+        with self.assertRaisesRegex(ValueError,'해제 파일 변경됨'):
+            self.e.clean_flat(r,{'.smi'})
+
+
 if __name__=='__main__':unittest.main()
