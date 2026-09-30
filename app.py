@@ -1,0 +1,132 @@
+import argparse, json, os, queue, subprocess, sys, threading, traceback
+from pathlib import Path
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from engine import Engine, Cancelled, SOURCES
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__(); self.title('자막 중복 정리'); self.geometry('1140x790'); self.minsize(880,650)
+        self.inputs={s:[] for s in SOURCES}; self.run_data=None; self.busy=False; self.events=queue.Queue(); self.stop=threading.Event()
+        self.output=tk.StringVar(value=str(Path.home()/'Downloads'/'SubtitleCleanup'))
+        self.cross=tk.BooleanVar(value=True); self.status=tk.StringVar(value='원본 폴더 또는 분할 ZIP을 선택하세요.')
+        style=ttk.Style(); style.theme_use('clam'); style.configure('TButton', padding=7)
+        style.configure('Header.TLabel',font=('Malgun Gothic',17,'bold'))
+        panel=ttk.Frame(self,padding=16); panel.pack(fill='both',expand=True)
+        ttk.Label(panel,text='자막 중복 정리',style='Header.TLabel').pack(anchor='w')
+        ttk.Label(panel,text='세 소스를 한 작업 공간에서 비교합니다. 원본을 보존하고 복사본만 정리합니다.').pack(anchor='w',pady=(4,12))
+        self.controls=[]; self.lists={}
+        for s in SOURCES:
+            row=ttk.LabelFrame(panel,text=s,padding=6); row.pack(fill='x',pady=3)
+            view=tk.Listbox(row,height=2,font=('Malgun Gothic',9)); view.pack(side='left',fill='x',expand=True); self.lists[s]=view
+            for label,fn in [('폴더 추가',lambda s=s:self.add_folder(s)),('ZIP 추가',lambda s=s:self.add_zip(s)),('비우기',lambda s=s:self.clear(s))]:
+                b=ttk.Button(row,text=label,command=fn); b.pack(side='left',padx=3);self.controls.append(b)
+        row=ttk.Frame(panel);row.pack(fill='x',pady=8)
+        ttk.Label(row,text='결과 위치').pack(side='left');ttk.Entry(row,textvariable=self.output).pack(side='left',fill='x',expand=True,padx=8)
+        b=ttk.Button(row,text='선택',command=self.choose_output);b.pack(side='left');self.controls.append(b)
+        ttk.Checkbutton(panel,text='소스 사이의 확정 중복도 대표본 하나만 남김',variable=self.cross).pack(anchor='w')
+        ttk.Label(panel,text='ZIP은 내부 파일명과 압축 방식이 달라도 전체 내용이 같으면 중복입니다. 내용 차이·오배치 의심은 보존합니다.').pack(anchor='w',pady=5)
+        actions=ttk.Frame(panel);actions.pack(fill='x',pady=6)
+        for label,fn in [('1. 분석',self.analyze),('2. 확정 중복 정리·ZIP 생성',self.apply),('작업 불러오기',self.load),('삭제 파일 복원',self.restore),('결과 열기',self.open_output)]:
+            b=ttk.Button(actions,text=label,command=fn);b.pack(side='left',padx=3);self.controls.append(b)
+        ttk.Button(actions,text='중지',command=self.stop.set).pack(side='right')
+        self.bar=ttk.Progressbar(panel,mode='indeterminate');self.bar.pack(fill='x',pady=4)
+        ttk.Label(panel,textvariable=self.status).pack(anchor='w',pady=3)
+        tabs=ttk.Notebook(panel);tabs.pack(fill='both',expand=True)
+        frame=ttk.Frame(tabs);tabs.add(frame,text='분석 결과')
+        self.tree=ttk.Treeview(frame,columns=('group','action','path','representative','reason'),show='headings')
+        for key,label,w in [('group','그룹',90),('action','처리',80),('path','파일 경로',350),('representative','보존 대표본',350),('reason','근거',250)]:
+            self.tree.heading(key,text=label,command=lambda k=key:self.sort(k));self.tree.column(key,width=w)
+        vs=ttk.Scrollbar(frame,orient='vertical',command=self.tree.yview);vs.pack(side='right',fill='y');self.tree.configure(yscrollcommand=vs.set)
+        hs=ttk.Scrollbar(frame,orient='horizontal',command=self.tree.xview);hs.pack(side='bottom',fill='x');self.tree.configure(xscrollcommand=hs.set);self.tree.pack(fill='both',expand=True)
+        self.log_widget=tk.Text(tabs,height=12,font=('Malgun Gothic',10));tabs.add(self.log_widget,text='진행 로그')
+        self.after(120,self.poll);self.protocol('WM_DELETE_WINDOW',self.close)
+    def add_folder(self,s):
+        p=filedialog.askdirectory()
+        if p:self.add(s,[p])
+    def add_zip(self,s):
+        ps=filedialog.askopenfilenames(filetypes=[('ZIP','*.zip')])
+        self.add(s,ps)
+    def add(self,s,ps):
+        for p in ps:
+            if p not in self.inputs[s]:self.inputs[s].append(p);self.lists[s].insert('end',p)
+    def clear(self,s):self.inputs[s]=[];self.lists[s].delete(0,'end')
+    def choose_output(self):
+        p=filedialog.askdirectory()
+        if p:self.output.set(p)
+    def worker(self,fn):
+        if self.busy:return
+        self.busy=True;self.stop.clear();self.bar.start()
+        for b in self.controls:b.configure(state='disabled')
+        def work():
+            try:self.events.put(('done',fn(Engine(lambda x:self.events.put(('log',x)),self.stop))))
+            except Cancelled as e:self.events.put(('cancel',str(e)))
+            except Exception as e:self.events.put(('error',(str(e),traceback.format_exc())))
+        threading.Thread(target=work,daemon=True).start()
+    def analyze(self):
+        if not any(self.inputs.values()):messagebox.showinfo('입력','원본 폴더나 ZIP을 선택하세요.');return
+        inputs={s:list(ps) for s,ps in self.inputs.items()}; output=self.output.get();cross=self.cross.get()
+        self.worker(lambda e:e.analyze(inputs,output,cross))
+    def apply(self):
+        if not self.run_data or self.run_data['state']!='분석 완료':messagebox.showinfo('분석','먼저 분석을 완료하세요.');return
+        n=sum(r['delete'] for r in self.run_data['records']);size=sum(r['size'] for r in self.run_data['records'] if r['delete'])/1024**2
+        if messagebox.askyesno('복사본 정리',f'확정 중복 {n:,}개 ({size:,.1f} MiB)를 작업 복사본에서 삭제하고 ZIP을 만들까요?\n원본은 유지됩니다. 상세 내역은 Excel에서 확인할 수 있습니다.'):
+            self.worker(lambda e:(e.apply(self.run_data),self.run_data)[1])
+    def restore(self):
+        if not self.run_data:return
+        self.worker(lambda e:(e.restore(self.run_data),self.run_data)[1])
+    def load(self):
+        p=filedialog.askopenfilename(filetypes=[('작업 기록','manifest.json')])
+        if not p:return
+        try:
+            data=json.loads(Path(p).read_text(encoding='utf-8'))
+            # Treat records as data, never allow loaded paths to escape the chosen run folder.
+            from engine import safe_member
+            data['run']=str(Path(p).resolve().parent)
+            for r in data['records']:
+                if r['source'] not in SOURCES:raise ValueError('소스 오류')
+                safe_member(r['rel'])
+            self.run_data=data;self.refresh()
+        except Exception as e:messagebox.showerror('불러오기 실패',str(e))
+    def refresh(self):
+        self.tree.delete(*self.tree.get_children())
+        if not self.run_data:return
+        rs=self.run_data['records']; n=sum(r['delete'] for r in rs)
+        self.status.set(f'{self.run_data["state"]} | 전체 {len(rs):,}개 | 확정 중복 후보 {n:,}개 | 실제 삭제 {sum(r["actual"] for r in rs):,}개 | 검토 {len(self.run_data.get("reviews",[])):,}건')
+        for r in rs:
+            if r['group'] or r['error']:
+                self.tree.insert('','end',values=(r['group'],'삭제' if r['actual'] else ('삭제 후보' if r['delete'] else '보존'),r['source']+'/'+r['rel'],r['representative'],r['error'] or r['reason']))
+    def sort(self,k):
+        items=sorted((self.tree.set(i,k),i) for i in self.tree.get_children())
+        for n,(_,i) in enumerate(items):self.tree.move(i,'',n)
+    def open_output(self):
+        p=self.run_data['run'] if self.run_data else self.output.get()
+        if not Path(p).exists():return
+        if os.name=='nt':os.startfile(p)
+        else:subprocess.Popen(['xdg-open',p])
+    def poll(self):
+        while True:
+            try:kind,value=self.events.get_nowait()
+            except queue.Empty:break
+            if kind=='log':
+                self.log_widget.insert('end',value+'\n');self.log_widget.see('end');self.status.set(value)
+            else:
+                self.busy=False;self.bar.stop()
+                for b in self.controls:b.configure(state='normal')
+                if kind=='done':self.run_data=value;self.refresh()
+                elif kind=='error':
+                    self.log_widget.insert('end',value[1]+'\n');messagebox.showerror('작업 실패',value[0]);self.refresh()
+                else:self.status.set(value)
+        self.after(120,self.poll)
+    def close(self):
+        if self.busy:
+            self.stop.set();messagebox.showinfo('중지 요청','중지 후 창을 닫아주세요.');return
+        self.destroy()
+
+def main():
+    parser=argparse.ArgumentParser();parser.add_argument('--smoke-test',action='store_true');args=parser.parse_args()
+    app=App()
+    if args.smoke_test:app.update();app.destroy();return
+    app.mainloop()
+
+if __name__=='__main__':main()
