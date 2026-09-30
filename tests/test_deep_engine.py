@@ -201,12 +201,14 @@ class DeepTests(unittest.TestCase):
         self.assertIn('jpg_noext.jpg',names)
         self.assertIn('zero_noext',names)
 
-        by_old={x['old_path'].split('/')[-1]:x for x in r['extensionless_detection']}
-        self.assertEqual(by_old['archive_noext']['kind'],'archive')
-        self.assertIn('ZIP 재귀 해제',by_old['archive_noext']['action'])
-        self.assertEqual(by_old['seven_noext']['detected_extension'],'.7z')
-        self.assertEqual(by_old['egg_noext']['detected_extension'],'.egg')
-        self.assertEqual(by_old['alz_noext']['detected_extension'],'.alz')
-        self.assertEqual(by_old['zero_noext']['kind'],'empty')
+        def detected(name):
+            return next(x for x in r['extensionless_detection']
+                        if x['old_path'].replace('\\\\','/').endswith('/'+name))
+        self.assertEqual(detected('archive_noext')['kind'],'archive')
+        self.assertIn('ZIP 재귀 해제',detected('archive_noext')['action'])
+        self.assertEqual(detected('seven_noext')['detected_extension'],'.7z')
+        self.assertEqual(detected('egg_noext')['detected_extension'],'.egg')
+        self.assertEqual(detected('alz_noext')['detected_extension'],'.alz')
+        self.assertEqual(detected('zero_noext')['kind'],'empty')
 
 if __name__=='__main__':unittest.main()
