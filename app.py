@@ -28,7 +28,7 @@ class App(tk.Tk):
         ttk.Checkbutton(panel,text='소스 사이의 확정 중복도 대표본 하나만 남김',variable=self.cross).pack(anchor='w')
         ttk.Label(panel,text='해제본은 expanded/소스/작품명/ 바로 아래에 모입니다. 같은 이름은 __2 식으로 보존하고, 모든 확장자를 조사합니다.').pack(anchor='w',pady=5)
         actions=ttk.Frame(panel);actions.pack(fill='x',pady=6)
-        for label,fn in [('전체 압축 해제·확장자 조사',self.analyze),('무확장자 자막 판별',self.detect_extensionless),('선택 확장자 적용·중복 정리',self.choose_extensions_and_clean),('작업 불러오기',self.load),('원래 구조 복원',self.restore),('결과 열기',self.open_output)]:
+        for label,fn in [('전체 압축 해제·확장자 조사',self.analyze),('무확장자 형식 판별',self.detect_extensionless),('선택 확장자 적용·중복 정리',self.choose_extensions_and_clean),('작업 불러오기',self.load),('원래 구조 복원',self.restore),('결과 열기',self.open_output)]:
             b=ttk.Button(actions,text=label,command=fn);b.pack(side='left',padx=3);self.controls.append(b)
         ttk.Button(actions,text='중지',command=self.stop.set).pack(side='right')
         self.bar=ttk.Progressbar(panel,mode='indeterminate');self.bar.pack(fill='x',pady=4)
@@ -79,7 +79,7 @@ class App(tk.Tk):
         n=sum(not Path(r['name']).suffix for r in self.run_data.get('records',[]))
         if not n:
             messagebox.showinfo('판별','확장자 없는 파일이 없습니다.');return
-        if messagebox.askyesno('무확장자 자막 판별',f'확장자 없는 파일 {n:,}개만 내용을 읽어 SMI/SRT/ASS/SSA/VTT/SUB/IDX 형식을 판별할까요?\n전체 ZIP 재해제는 하지 않습니다.'):
+        if messagebox.askyesno('무확장자 형식 판별',f'확장자 없는 파일 {n:,}개만 검사합니다.\n\n자막 형식뿐 아니라 ZIP/7z/RAR/EGG/ALZ 등 압축 형식과 흔한 이미지·폰트·PDF도 시그니처로 판별합니다.\n유효한 ZIP은 같은 작품 폴더에 바로 재귀 해제하고, 다른 압축 형식은 확장자만 붙여 보존합니다.\n\n전체 원본 재스캔은 하지 않습니다.'):
             self.worker(lambda e:e.detect_extensionless(self.run_data))
 
     def choose_extensions_and_clean(self):
@@ -88,7 +88,7 @@ class App(tk.Tk):
             return
         records=self.run_data.get('records',[])
         if any(not Path(r['name']).suffix for r in records) and not self.run_data.get('extensionless_scanned'):
-            messagebox.showinfo('정리','확장자 없는 파일이 남아 있습니다. 먼저 `무확장자 자막 판별`을 실행하세요.')
+            messagebox.showinfo('정리','확장자 없는 파일이 남아 있습니다. 먼저 `무확장자 형식 판별`을 실행하세요.')
             return
         if not records:
             messagebox.showinfo('정리','조사된 파일이 없습니다.');return
@@ -102,13 +102,16 @@ class App(tk.Tk):
         win.geometry('460x560');win.minsize(380,420)
         body=ttk.Frame(win,padding=14);body.pack(fill='both',expand=True)
         ttk.Label(body,text='남길 확장자만 선택',font=('Malgun Gothic',13,'bold')).pack(anchor='w')
-        ttk.Label(body,text='선택하지 않은 확장자는 제거하고, 선택 파일은 작품 폴더 안에서 SHA-256이 같은 것만 하나 남깁니다.').pack(anchor='w',pady=(4,10))
+        ttk.Label(body,text='선택하지 않은 확장자는 제거합니다. 미해제 압축 형식은 안전상 기본 선택되고, 자막은 작품 폴더 안에서 SHA-256이 같은 것만 하나 남깁니다.').pack(anchor='w',pady=(4,10))
 
         frame=ttk.Frame(body);frame.pack(fill='both',expand=True)
         lb=tk.Listbox(frame,selectmode='multiple',font=('Consolas',10),exportselection=False)
         sb=ttk.Scrollbar(frame,orient='vertical',command=lb.yview);lb.configure(yscrollcommand=sb.set)
         lb.pack(side='left',fill='both',expand=True);sb.pack(side='right',fill='y')
         defaults=set(SUBS)-{'.txt'}
+        # Unresolved archives are selected by default so cleanup cannot silently delete them.
+        archive_exts={'.zip','.7z','.rar','.egg','.alz','.gz','.bz2','.xz','.tar'}
+        defaults |= {ext for ext in exts if ext in archive_exts or __import__('re').fullmatch(r'\.z\d\d',ext)}
         for i,ext in enumerate(exts):
             lb.insert('end',f'{ext:<10} {counts[ext]:>8,}개')
             if ext in defaults:lb.selection_set(i)
