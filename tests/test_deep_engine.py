@@ -211,4 +211,52 @@ class DeepTests(unittest.TestCase):
         self.assertEqual(detected('alz_noext')['detected_extension'],'.alz')
         self.assertEqual(detected('zero_noext')['kind'],'empty')
 
+    def test_extract_remaining_archives_flattens_registers_and_skips_fonts(self):
+        self.put(self.a,'작품/subs.rar',b'rar-placeholder')
+        self.put(self.a,'작품/font bundle.7z',b'font-placeholder')
+        self.put(self.a,'작품/bad.egg',b'bad-placeholder')
+        r=self.run_analysis()
+
+        calls=[]
+        def fake_extract(archive,dest):
+            calls.append(Path(archive).name)
+            dest=Path(dest)
+            if Path(archive).name=='subs.rar':
+                (dest/'inside').mkdir(parents=True)
+                (dest/'inside'/'01.smi').write_bytes(b'episode1')
+                (dest/'nested.7z').write_bytes(b'nested-placeholder')
+            elif Path(archive).name=='nested.7z':
+                (dest/'deep').mkdir(parents=True)
+                (dest/'deep'/'02.ass').write_bytes(b'[Script Info]\n[Events]\n')
+            elif Path(archive).name=='bad.egg':
+                raise ValueError('broken archive')
+            else:
+                raise AssertionError('unexpected extractor call: '+Path(archive).name)
+
+        self.e.extract_remaining_archives(r,extractor=fake_extract)
+        folder=Path(r['run'])/'expanded'/SOURCES[0]/'작품'
+        names=sorted(p.name for p in folder.iterdir() if p.is_file())
+
+        self.assertIn('subs.rar',names)
+        self.assertIn('font bundle.7z',names)
+        self.assertIn('bad.egg',names)
+        self.assertIn('01.smi',names)
+        self.assertIn('nested.7z',names)
+        self.assertIn('02.ass',names)
+        self.assertNotIn('font bundle.7z',calls)
+        self.assertIn('subs.rar',calls)
+        self.assertIn('nested.7z',calls)
+        self.assertIn('bad.egg',calls)
+
+        subs=next(x for x in r['records'] if x['name']=='subs.rar')
+        nested=next(x for x in r['records'] if x['name']=='nested.7z')
+        bad=next(x for x in r['records'] if x['name']=='bad.egg')
+        font=next(x for x in r['records'] if x['name']=='font bundle.7z')
+        self.assertTrue(subs['external_archive_extracted'])
+        self.assertTrue(nested['external_archive_extracted'])
+        self.assertIn('broken archive',bad['external_archive_error'])
+        self.assertEqual(font.get('external_archive_skip'),'font')
+        self.assertTrue((Path(r['run'])/'remaining_archive_extraction.csv').exists())
+        self.assertTrue(r['remaining_archives_scanned'])
+
 if __name__=='__main__':unittest.main()
