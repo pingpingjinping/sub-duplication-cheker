@@ -69,7 +69,7 @@ class DeepTests(unittest.TestCase):
         # Excel is standard OOXML; check deletion count without requiring extra libraries in CI.
         import xml.etree.ElementTree as ET
         with zipfile.ZipFile(Path(r['run'])/'subtitle_cleanup_report.xlsx') as z:
-            rows=ET.fromstring(z.read('xl/worksheets/sheet2.xml')).findall('.//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}row')
+            rows=ET.fromstring(z.read('xl/worksheets/sheet3.xml')).findall('.//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}row')
             self.assertEqual(len(rows)-1,1)
     def test_same_named_version_preserved_and_reviewed(self):
         self.put(self.a,'작품/a.zip',zb([('episode.srt',b'time1')]))
