@@ -363,11 +363,16 @@ def report(run):
         summary += [['파일 수·용량 기준','개별 해제 파일 기준. 검증 불가 ZIP은 보존된 ZIP 자체 크기로 계산.'],['절약 용량 기준','최종 결과에서 제거된 개별 파일의 비압축 바이트. 원본·복구용 복사본 보존으로 디스크 사용량 감소를 뜻하지 않음.']]
         for source in SOURCES:
             orig=[r for r in run.get('top_records',[]) if r['source']==source]
-            result_root='expanded' if run.get('cleanup_mode')=='flat_whitelist' else 'cleaned'
-            folder=Path(run['run'])/result_root/source
+            if run.get('cleanup_mode')=='flat_whitelist':
+                final=[r for r in records if r['source']==source and not r['actual']]
+                result_count=len(final);result_size=sum(r['size'] for r in final)
+            else:
+                folder=Path(run['run'])/'cleaned'/source
+                result_count=sum(p.is_file() for p in folder.rglob('*')) if folder.exists() else 0
+                result_size=sum(p.stat().st_size for p in folder.rglob('*') if p.is_file()) if folder.exists() else 0
             summary += [[source+' 원래 상위 파일 수',len(orig)],[source+' 원래 상위 용량(Bytes)',sum(r['size'] for r in orig)],
-                        [source+' 결과 상위 파일 수',sum(p.is_file() for p in folder.rglob('*')) if folder.exists() else 0],
-                        [source+' 결과 실제 용량(Bytes)',sum(p.stat().st_size for p in folder.rglob('*') if p.is_file()) if folder.exists() else 0]]
+                        [source+' 결과 상위 파일 수',result_count],
+                        [source+' 결과 실제 용량(Bytes)',result_size]]
     deleted=[['소스','원래 전체 경로','작업 경로','파일명','크기(Bytes)','크기(MiB)','SHA-256','분류','삭제 사유','보존된 대표 파일 경로','중복 그룹 ID','실제 삭제 여부']]
     kept=[['소스','최종 경로','파일명','크기(Bytes)','SHA-256','작품명','회차','업로더/번역자/릴','보존 사유','중복 그룹 ID']]
     misplaced=[['소스','현재 작품','현재 회차','원래 경로','파일명','추정 작품','판단 근거','처리 결과']]
