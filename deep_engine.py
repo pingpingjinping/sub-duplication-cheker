@@ -465,8 +465,12 @@ class Engine(BaseEngine):
         self.log(f'깨진 ZIP 파일명 복구 완료: {renamed:,}개')
         return run
 
-    def recover_names_from_original(self, run, original_root, source):
-        """Recover flattened filenames by exact content match against the original source tree/ZIPs."""
+    def recover_names_from_original(self, run, original_root, source, bandizip=None, extractor=None):
+        """Recover flattened filenames by exact content match against the original source tree and archives.
+
+        ZIPs are read directly. RAR/7z/EGG/ALZ, including extensionless files recognized by
+        signature, are temporarily extracted with Bandizip (or a test extractor).
+        """
         if run.get('version')!=2:
             raise ValueError('작품 폴더별 해제 작업에서만 사용할 수 있습니다.')
         if run.get('state') not in ('분석 완료','정리 완료'):
@@ -482,7 +486,6 @@ class Engine(BaseEngine):
         if not targets:
             raise ValueError('선택한 소스의 현재 expanded 파일이 없습니다.')
 
-        # Index only work/size combinations that still exist in the flattened result.
         wanted=collections.defaultdict(set)
         current=collections.defaultdict(list)
         for r in targets:
@@ -492,8 +495,10 @@ class Engine(BaseEngine):
 
         candidates=collections.defaultdict(set)
         scan_errors=[]
-        loose_checked=0;archive_checked=0;archive_leaf_checked=0
+        loose_checked=0;zip_checked=0;external_checked=0;archive_leaf_checked=0
         total_unpacked=0
+        executable='' if extractor else self.find_bandizip(bandizip)
+        external_exts={'.7z','.rar','.egg','.alz'}
         self.log(f'원본 비교 이름 복구: {source} / 현재 파일 {len(targets):,}개')
 
         def remember(work,size,digest,name,origin):
@@ -512,24 +517,84 @@ class Engine(BaseEngine):
                 h.update(block)
             return h.hexdigest()
 
-        def walk_zip(z,work,origin,depth=0):
-            nonlocal archive_leaf_checked,total_unpacked
+        def signature_kind(data):
+            if data.startswith(b'7z\xbc\xaf\x27\x1c'):return '.7z'
+            if data.startswith(b'Rar!\x1a\x07\x00') or data.startswith(b'Rar!\x1a\x07\x01\x00'):return '.rar'
+            if data.startswith(b'EGGA'):return '.egg'
+            if data.startswith(b'ALZ\x01'):return '.alz'
+            return ''
+
+        def disk_archive_kind(path):
+            suffix=Path(path).suffix.lower()
+            if zipfile.is_zipfile(fs_path(path)):
+                return '.zip'
+            if suffix in external_exts:
+                return suffix
+            if not suffix:
+                try:
+                    with open(fs_path(path),'rb') as fh:
+                        return signature_kind(fh.read(16))
+                except OSError:
+                    return ''
+            return ''
+
+        def extract_external(archive,destination):
+            if extractor:
+                extractor(archive,destination)
+                return
+            if not executable:
+                raise ValueError('원본의 RAR/7z/EGG/ALZ 내부 이름 비교에 Bandizip bz.exe가 필요합니다.')
+            self._bandizip_extract(executable,archive,destination)
+
+        def walk_external(archive,work,origin,depth=0):
+            nonlocal external_checked,archive_leaf_checked,total_unpacked
             if depth>8:
-                raise ValueError('중첩 ZIP 깊이 제한 초과')
+                raise ValueError('중첩 압축 깊이 제한 초과')
+            external_checked+=1
+            temp=Path(tempfile.mkdtemp(prefix='subtitle-origin-archive-'))
+            try:
+                extract_external(archive,temp)
+                files=sorted((p for p in temp.rglob('*') if p.is_file()),key=lambda p:p.as_posix().casefold())
+                for p in files:
+                    self.check()
+                    member=p.relative_to(temp).as_posix()
+                    size=file_size(p)
+                    total_unpacked+=size
+                    if total_unpacked>4*1024**3:
+                        raise ValueError('원본 압축 비교 누적 4GiB 제한 초과')
+                    kind=disk_archive_kind(p)
+                    if kind=='.zip':
+                        with zipfile.ZipFile(fs_path(p)) as z:
+                            walk_zip(z,work,origin+'!/'+member,depth+1)
+                        continue
+                    if kind in external_exts:
+                        walk_external(p,work,origin+'!/'+member,depth+1)
+                        continue
+                    if size not in wanted.get(work,set()):
+                        continue
+                    digest=sha(p);archive_leaf_checked+=1
+                    remember(work,size,digest,Path(member).name,origin+'!/'+member)
+            finally:
+                shutil.rmtree(fs_path(temp),ignore_errors=True)
+
+        def walk_zip(z,work,origin,depth=0):
+            nonlocal zip_checked,archive_leaf_checked,total_unpacked
+            if depth>8:
+                raise ValueError('중첩 압축 깊이 제한 초과')
+            zip_checked+=1
             for info in z.infolist():
                 self.check()
                 member_name=repair_legacy_zip_name(info.filename,info.flag_bits)
                 safe_member(member_name)
                 if info.is_dir():continue
-                if stat.S_ISLNK(info.external_attr>>16):
-                    continue
-                if info.flag_bits&1:
+                if stat.S_ISLNK(info.external_attr>>16) or info.flag_bits&1:
                     continue
                 total_unpacked+=info.file_size
                 if total_unpacked>4*1024**3:
-                    raise ValueError('원본 ZIP 비교 누적 4GiB 제한 초과')
+                    raise ValueError('원본 압축 비교 누적 4GiB 제한 초과')
+                suffix=Path(member_name).suffix.lower()
                 with z.open(info) as src:
-                    if member_name.lower().endswith('.zip'):
+                    if suffix=='.zip':
                         with tempfile.SpooledTemporaryFile(max_size=32*1024**2) as data:
                             while True:
                                 self.check();block=src.read(1024*1024)
@@ -542,12 +607,39 @@ class Engine(BaseEngine):
                             except (zipfile.BadZipFile,OSError):
                                 pass
                         continue
+
+                    # External archive with an extension, or an extensionless member whose
+                    # signature says RAR/7z/EGG/ALZ: materialize only that member temporarily.
+                    if suffix in external_exts or not suffix:
+                        with tempfile.SpooledTemporaryFile(max_size=32*1024**2) as data:
+                            while True:
+                                self.check();block=src.read(1024*1024)
+                                if not block:break
+                                data.write(block)
+                            data.seek(0)
+                            head=data.read(16);data.seek(0)
+                            external_kind=suffix if suffix in external_exts else signature_kind(head)
+                            if external_kind:
+                                temp=Path(tempfile.mkdtemp(prefix='subtitle-origin-member-'))
+                                try:
+                                    archive=temp/('member'+external_kind)
+                                    with open(fs_path(archive),'wb') as dst:
+                                        shutil.copyfileobj(data,dst)
+                                    walk_external(archive,work,origin+'!/'+member_name,depth+1)
+                                finally:
+                                    shutil.rmtree(fs_path(temp),ignore_errors=True)
+                                continue
+                            if info.file_size in wanted.get(work,set()):
+                                digest=hash_stream(data);archive_leaf_checked+=1
+                                remember(work,info.file_size,digest,member_name,origin+'!/'+member_name)
+                        continue
+
                     if info.file_size not in wanted.get(work,set()):
                         continue
                     digest=hash_stream(src);archive_leaf_checked+=1
                     remember(work,info.file_size,digest,member_name,origin+'!/'+member_name)
 
-        # The original source root follows the same rule: immediate children are work folders.
+        # Same rule as analysis: the source root's immediate children are work folders.
         for p in sorted(original_root.rglob('*'),key=lambda x:x.as_posix().casefold()):
             self.check()
             if p.is_symlink() or not p.is_file():
@@ -557,11 +649,13 @@ class Engine(BaseEngine):
             if work not in wanted:
                 continue
             try:
-                is_zip=p.suffix.lower()=='.zip' or (not p.suffix and zipfile.is_zipfile(fs_path(p)))
-                if is_zip:
-                    archive_checked+=1
+                kind=disk_archive_kind(p)
+                if kind=='.zip':
                     with zipfile.ZipFile(fs_path(p)) as z:
                         walk_zip(z,work,str(rel).replace('\\','/'))
+                    continue
+                if kind in external_exts:
+                    walk_external(p,work,str(rel).replace('\\','/'))
                     continue
                 size=file_size(p)
                 if size not in wanted[work]:
@@ -598,7 +692,6 @@ class Engine(BaseEngine):
                 raise ValueError('expanded 파일이 변경되었습니다: '+str(old))
             dest=old.with_name(desired);base=dest;k=2
             while os.path.exists(fs_path(dest)) and os.path.normcase(str(dest))!=os.path.normcase(str(old)):
-                # Never overwrite a different file just to restore a name.
                 dest=base.with_name(base.stem+f'__{k}'+base.suffix);k+=1
             os.replace(fs_path(old),fs_path(dest))
             before=r['name'];r['name']=dest.name;r['work']=str(dest.relative_to(root))
@@ -619,6 +712,11 @@ class Engine(BaseEngine):
         ]
         run['original_name_recovery_source']=str(original_root)
         run['original_name_recovery_errors']=scan_errors
+        run['original_name_recovery_archive_stats']={
+            'zip_archives':zip_checked,'external_archives':external_checked,
+            'archive_leaf_candidates':archive_leaf_checked,'loose_files':loose_checked,
+            'errors':len(scan_errors)
+        }
         out=root/'original_name_recovery.csv'
         with open(fs_path(out),'w',encoding='utf-8-sig',newline='') as fh:
             w=csv.writer(fh)
@@ -628,7 +726,8 @@ class Engine(BaseEngine):
         self.log(
             f'원본 비교 이름 복구 완료: 복구 {renamed:,}개 / 이미 동일 {already:,}개 / '
             f'복수 후보 {ambiguous:,}개 / 미매칭 {missing:,}개 / '
-            f'원본 일반파일 {loose_checked:,}개·ZIP {archive_checked:,}개·ZIP 내부 후보 {archive_leaf_checked:,}개'
+            f'원본 일반파일 {loose_checked:,}개·ZIP {zip_checked:,}개·RAR/7z/EGG/ALZ {external_checked:,}개·'
+            f'압축 내부 후보 {archive_leaf_checked:,}개 / 오류 {len(scan_errors):,}건'
         )
         return run
 

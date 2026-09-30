@@ -354,4 +354,28 @@ class DeepTests(unittest.TestCase):
         self.assertIn('B 01화.smi',row['original_name'])
 
 
+    def test_original_name_recovery_opens_extensionless_rar_by_signature(self):
+        original=self.root/'original-anissia';original.mkdir()
+        payload=b'exact subtitle from extensionless rar'
+        self.put(self.a,'작품/broken-name.smi',payload)
+        archive=self.put(original,'작품/archive_noext',b'Rar!\x1a\x07\x00fake-rar')
+
+        calls=[]
+        def fake_extract(path,dest):
+            calls.append(Path(path).name)
+            dest=Path(dest)
+            (dest/'inside').mkdir(parents=True,exist_ok=True)
+            (dest/'inside'/'정상 자막 05화.smi').write_bytes(payload)
+
+        r=self.run_analysis()
+        self.e.recover_names_from_original(r,original,SOURCES[0],extractor=fake_extract)
+        folder=Path(r['run'])/'expanded'/SOURCES[0]/'작품'
+        self.assertFalse((folder/'broken-name.smi').exists())
+        self.assertTrue((folder/'정상 자막 05화.smi').exists())
+        self.assertIn('archive_noext',calls)
+        rec=next(x for x in r['records'] if x['source']==SOURCES[0] and x['name']=='정상 자막 05화.smi')
+        self.assertEqual(rec['episode'],'05')
+        self.assertEqual(r['original_name_recovery_archive_stats']['external_archives'],1)
+
+
 if __name__=='__main__':unittest.main()
