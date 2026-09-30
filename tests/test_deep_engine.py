@@ -419,4 +419,28 @@ class DeepTests(unittest.TestCase):
         self.assertEqual(rec['name'],'subtitle_noext.smi')
 
 
+    def test_original_recovery_archive_limit_resets_per_top_level_archive(self):
+        import deep_engine
+        original=self.root/'original-anissia';original.mkdir()
+        p1=b'first-payload-15'
+        p2=b'second-payload15'
+        self.put(self.a,'작품/a.smi',p1)
+        self.put(self.a,'작품/b.smi',p2)
+        self.put(original,'작품/pack1.zip',zb([('원본 01화.smi',p1)]))
+        self.put(original,'작품/pack2.zip',zb([('원본 02화.smi',p2)]))
+        r=self.run_analysis()
+
+        previous=deep_engine.ORIGINAL_ARCHIVE_LIMIT
+        deep_engine.ORIGINAL_ARCHIVE_LIMIT=max(len(p1),len(p2))+1
+        try:
+            self.e.recover_names_from_original(r,original,SOURCES[0],extractor=lambda a,d: None)
+        finally:
+            deep_engine.ORIGINAL_ARCHIVE_LIMIT=previous
+
+        folder=Path(r['run'])/'expanded'/SOURCES[0]/'작품'
+        self.assertTrue((folder/'원본 01화.smi').exists())
+        self.assertTrue((folder/'원본 02화.smi').exists())
+        self.assertEqual(r['original_name_recovery_archive_stats']['errors'],0)
+
+
 if __name__=='__main__':unittest.main()
