@@ -3,6 +3,8 @@ import collections, csv, hashlib, json, os, re, shutil, stat, subprocess, tempfi
 from pathlib import Path
 from engine import Engine as BaseEngine, SOURCES, SUBS, Cancelled, sha, safe_member, metadata, report, fs_path, file_size, ensure_dir, copy2_file, repair_legacy_zip_name, episode_hint, canonical_work_name
 
+ORIGINAL_ARCHIVE_LIMIT=4*1024**3
+
 class Engine(BaseEngine):
     deep_mode = True
 
@@ -496,7 +498,6 @@ class Engine(BaseEngine):
         candidates=collections.defaultdict(set)
         scan_errors=[]
         loose_checked=0;zip_checked=0;external_checked=0;archive_leaf_checked=0
-        total_unpacked=0
         executable='' if extractor else self.find_bandizip(bandizip)
         external_exts={'.7z','.rar','.egg','.alz'}
         self.log(f'원본 비교 이름 복구: {source} / 현재 파일 {len(targets):,}개')
@@ -546,8 +547,9 @@ class Engine(BaseEngine):
                 raise ValueError('원본의 RAR/7z/EGG/ALZ 내부 이름 비교에 Bandizip bz.exe가 필요합니다.')
             self._bandizip_extract(executable,archive,destination)
 
-        def walk_external(archive,work,origin,depth=0):
-            nonlocal external_checked,archive_leaf_checked,total_unpacked
+        def walk_external(archive,work,origin,depth=0,budget=None):
+            nonlocal external_checked,archive_leaf_checked
+            if budget is None:budget=[0]
             if depth>8:
                 raise ValueError('중첩 압축 깊이 제한 초과')
             external_checked+=1
@@ -559,16 +561,16 @@ class Engine(BaseEngine):
                     self.check()
                     member=p.relative_to(temp).as_posix()
                     size=file_size(p)
-                    total_unpacked+=size
-                    if total_unpacked>4*1024**3:
-                        raise ValueError('원본 압축 비교 누적 4GiB 제한 초과')
+                    budget[0]+=size
+                    if budget[0]>ORIGINAL_ARCHIVE_LIMIT:
+                        raise ValueError('원본 압축 비교 개별 압축 4GiB 제한 초과')
                     kind=disk_archive_kind(p)
                     if kind=='.zip':
                         with zipfile.ZipFile(fs_path(p)) as z:
-                            walk_zip(z,work,origin+'!/'+member,depth+1)
+                            walk_zip(z,work,origin+'!/'+member,depth+1,budget)
                         continue
                     if kind in external_exts:
-                        walk_external(p,work,origin+'!/'+member,depth+1)
+                        walk_external(p,work,origin+'!/'+member,depth+1,budget)
                         continue
                     if size not in wanted.get(work,set()):
                         continue
@@ -577,8 +579,9 @@ class Engine(BaseEngine):
             finally:
                 shutil.rmtree(fs_path(temp),ignore_errors=True)
 
-        def walk_zip(z,work,origin,depth=0):
-            nonlocal zip_checked,archive_leaf_checked,total_unpacked
+        def walk_zip(z,work,origin,depth=0,budget=None):
+            nonlocal zip_checked,archive_leaf_checked
+            if budget is None:budget=[0]
             if depth>8:
                 raise ValueError('중첩 압축 깊이 제한 초과')
             zip_checked+=1
@@ -589,9 +592,9 @@ class Engine(BaseEngine):
                 if info.is_dir():continue
                 if stat.S_ISLNK(info.external_attr>>16) or info.flag_bits&1:
                     continue
-                total_unpacked+=info.file_size
-                if total_unpacked>4*1024**3:
-                    raise ValueError('원본 압축 비교 누적 4GiB 제한 초과')
+                budget[0]+=info.file_size
+                if budget[0]>ORIGINAL_ARCHIVE_LIMIT:
+                    raise ValueError('원본 압축 비교 개별 압축 4GiB 제한 초과')
                 suffix=Path(member_name).suffix.lower()
                 with z.open(info) as src:
                     if suffix=='.zip':
@@ -603,7 +606,7 @@ class Engine(BaseEngine):
                             data.seek(0)
                             try:
                                 with zipfile.ZipFile(data) as inner:
-                                    walk_zip(inner,work,origin+'!/'+member_name,depth+1)
+                                    walk_zip(inner,work,origin+'!/'+member_name,depth+1,budget)
                             except (zipfile.BadZipFile,OSError):
                                 pass
                         continue
@@ -625,7 +628,7 @@ class Engine(BaseEngine):
                                     archive=temp/('member'+external_kind)
                                     with open(fs_path(archive),'wb') as dst:
                                         shutil.copyfileobj(data,dst)
-                                    walk_external(archive,work,origin+'!/'+member_name,depth+1)
+                                    walk_external(archive,work,origin+'!/'+member_name,depth+1,budget)
                                 finally:
                                     shutil.rmtree(fs_path(temp),ignore_errors=True)
                                 continue
@@ -652,10 +655,10 @@ class Engine(BaseEngine):
                 kind=disk_archive_kind(p)
                 if kind=='.zip':
                     with zipfile.ZipFile(fs_path(p)) as z:
-                        walk_zip(z,work,str(rel).replace('\\','/'))
+                        walk_zip(z,work,str(rel).replace('\\','/'),0,[0])
                     continue
                 if kind in external_exts:
-                    walk_external(p,work,str(rel).replace('\\','/'))
+                    walk_external(p,work,str(rel).replace('\\','/'),0,[0])
                     continue
                 size=file_size(p)
                 if size not in wanted[work]:
