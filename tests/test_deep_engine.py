@@ -158,4 +158,24 @@ class DeepTests(unittest.TestCase):
         self.assertEqual(r['selected_extensions'],['.smi','.srt'])
         self.assertTrue((self.a/'작품A/pack1.zip').exists())
 
+    def test_detect_extensionless_subtitles_without_rescanning_archives(self):
+        self.put(self.a,'작품/pack.zip',zb([
+            ('smi_noext',b'<SAMI><BODY><SYNC Start=1000><P>hello'),
+            ('srt_noext',b'1\n00:00:01,000 --> 00:00:02,000\nhello\n'),
+            ('ass_noext',b'[Script Info]\nTitle: x\n[Events]\nFormat: Layer, Start, End, Style, Text\n'),
+            ('junk',b'https://example.com/watch')
+        ]))
+        r=self.run_analysis()
+        before=len(r['records'])
+        self.e.detect_extensionless(r)
+        self.assertEqual(len(r['records']),before)
+        folder=Path(r['run'])/'expanded'/SOURCES[0]/'작품'
+        names=sorted(p.name for p in folder.iterdir() if p.is_file())
+        self.assertIn('smi_noext.smi',names)
+        self.assertIn('srt_noext.srt',names)
+        self.assertIn('ass_noext.ass',names)
+        self.assertIn('junk',names)
+        self.assertTrue(r['extensionless_scanned'])
+        self.assertTrue((Path(r['run'])/'extensionless_detection.csv').exists())
+
 if __name__=='__main__':unittest.main()
