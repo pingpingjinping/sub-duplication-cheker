@@ -917,12 +917,26 @@ class Engine(BaseEngine):
                     r['delete']=True;r['reason']='같은 작품 폴더 내 SHA-256 동일'
 
         # Verify the flattened survey copy before deleting anything.
+        # A changed non-selected attachment is still going to be removed by explicit
+        # extension filtering, so it must not block subtitle cleanup. Kept files and
+        # SHA-based duplicate deletions remain strict.
+        changed_unselected=0
         for r in run['records']:
             self.check();p=root/r['work']
             if not os.path.exists(fs_path(p)):
                 raise ValueError('해제 파일이 없습니다: '+str(p))
-            if sha(p)!=r['sha']:
+            actual_sha=sha(p)
+            if actual_sha!=r['sha']:
+                if r['reason']=='선택되지 않은 확장자 제거':
+                    changed_unselected+=1
+                    r['sha_before_cleanup']=r['sha']
+                    r['sha']=actual_sha
+                    r['size']=file_size(p)
+                    r['reason']='선택되지 않은 확장자 제거 (작업본 내용 변경 감지)'
+                    continue
                 raise ValueError('해제 파일 변경됨: '+str(p))
+        if changed_unselected:
+            self.log(f'비선택 확장자 작업본 변경 감지: {changed_unselected:,}개 / 어차피 제거 대상이라 계속 진행')
 
         run['selected_extensions']=sorted(selected)
         run['cleanup_mode']='flat_whitelist'
