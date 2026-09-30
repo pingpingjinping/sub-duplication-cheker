@@ -9,9 +9,33 @@ SUBS = {'.smi', '.srt', '.ass', '.ssa', '.vtt', '.sub', '.idx', '.txt'}
 
 class Cancelled(Exception): pass
 
+def fs_path(path):
+    """Return an absolute filesystem path with Windows extended-length prefix."""
+    s = os.path.abspath(os.fspath(path))
+    if os.name != 'nt' or s.startswith('\\\\?\\'):
+        return s
+    if s.startswith('\\\\'):
+        return '\\\\?\\UNC\\' + s[2:]
+    return '\\\\?\\' + s
+
+def ensure_dir(path):
+    os.makedirs(fs_path(path), exist_ok=True)
+
+def file_size(path):
+    return os.stat(fs_path(path)).st_size
+
+def copy2_file(src, dst):
+    ensure_dir(Path(dst).parent)
+    try:
+        return shutil.copy2(fs_path(src), fs_path(dst))
+    except FileNotFoundError as e:
+        raise FileNotFoundError(
+            f'{e}\n원본: {src} (길이 {len(str(src))})\n대상: {dst} (길이 {len(str(dst))})'
+        ) from e
+
 def sha(path):
     h = hashlib.sha256()
-    with open(path, 'rb') as f:
+    with open(fs_path(path), 'rb') as f:
         for b in iter(lambda: f.read(1024 * 1024), b''): h.update(b)
     return h.hexdigest()
 
@@ -84,7 +108,9 @@ class Engine:
         if self.stop.is_set(): raise Cancelled('중지됨. 원본은 보존됩니다.')
     def save(self, run):
         p = Path(run['run']) / 'manifest.json'; tmp = p.with_suffix('.tmp')
-        tmp.write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding='utf-8'); tmp.replace(p)
+        with open(fs_path(tmp), 'w', encoding='utf-8') as f:
+            f.write(json.dumps(run, ensure_ascii=False, indent=2))
+        os.replace(fs_path(tmp), fs_path(p))
     def analyze(self, inputs, output, cross=True):
         output = Path(output).resolve()
         # Output may not live under an input folder (avoids recursive self-copy).
@@ -99,14 +125,15 @@ class Engine:
             list(Path(entry).iterdir()) and all(p.is_file() and re.match(r'(?i)(anissia_subtitles_part\d+|aniall_subtitles_part\d+|naverblog\d+)\.zip$',p.name) for p in Path(entry).iterdir())
             else [Path(entry)])] for s, paths in inputs.items()}
         root = output / ('SubtitleCleanup_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
-        root.mkdir(parents=True)
+        ensure_dir(root)
         run = {'version': 1, 'run': str(root), 'records': [], 'archives': [], 'cross': cross, 'state': '분석 중'}
         self.save(run)
         try:
             for source in SOURCES:
                 paths = inputs.get(source, [])
                 if not paths: continue
-                target = root / 'cleaned' / source; target.mkdir(parents=True)
+                target = root / 'cleaned' / source; ensure_dir(target)
+                imported_files = []
                 origins = {}
                 def destination(rel):
                     rel = str(safe_member(rel))
@@ -117,7 +144,7 @@ class Engine:
                         while dest.exists():
                             dest = base.with_name(base.stem + f'__import{k}' + base.suffix); k += 1
                         rel = dest.relative_to(target).as_posix()
-                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    ensure_dir(dest.parent)
                     return dest, rel
                 for entry in paths:
                     self.check(); p = Path(entry).resolve(); self.log(f'{source}: 가져오기 {p.name}')
@@ -126,7 +153,8 @@ class Engine:
                             self.check()
                             if f.is_symlink(): raise ValueError('심볼릭 링크는 가져올 수 없습니다: ' + str(f))
                             if not f.is_file(): continue
-                            dest, rel = destination(f.relative_to(p).as_posix()); shutil.copy2(f, dest)
+                            dest, rel = destination(f.relative_to(p).as_posix()); copy2_file(f, dest)
+                            imported_files.append(dest)
                             origins[rel] = {'file': str(f)}
                     else:
                         if p.suffix.lower() != '.zip': raise ValueError('입력은 폴더 또는 독립 ZIP이어야 합니다.')
@@ -141,17 +169,18 @@ class Engine:
                                 parts = list(member.parts)
                                 if parts and parts[0].casefold() == source: parts.pop(0)
                                 dest, rel = destination('/'.join(parts))
-                                with z.open(info) as src, open(dest, 'wb') as dst:
+                                with z.open(info) as src, open(fs_path(dest), 'wb') as dst:
                                     while True:
                                         self.check(); block = src.read(1024 * 1024)
                                         if not block: break
                                         dst.write(block)
+                                imported_files.append(dest)
                                 origins[rel] = {'archive': str(p), 'member_index': index, 'member': info.filename}
-                files = sorted(f for f in target.rglob('*') if f.is_file())
+                files = sorted(imported_files)
                 self.log(f'{source}: {len(files):,}개 파일 메타데이터·해시 분석')
                 for i, f in enumerate(files):
                     self.check(); rel = f.relative_to(target).as_posix(); title, ep, uploader, season = metadata(rel)
-                    r = {'source': source, 'rel': rel, 'name': f.name, 'size': f.stat().st_size,
+                    r = {'source': source, 'rel': rel, 'name': f.name, 'size': file_size(f),
                          'sha': sha(f), 'title': title, 'episode': ep, 'uploader': uploader, 'season': season,
                          'origin': origins[rel], 'signature': '', 'inner_names': [], 'error': '',
                          'delete': False, 'group': '', 'representative': '', 'reason': '', 'actual': False}
