@@ -378,4 +378,45 @@ class DeepTests(unittest.TestCase):
         self.assertEqual(r['original_name_recovery_archive_stats']['external_archives'],1)
 
 
+    def test_original_name_recovery_preserves_detected_subtitle_extension(self):
+        payload=b'<SAMI><BODY><SYNC Start=1000><P>hello'
+        self.put(self.a,'작품/subtitle_noext',payload)
+        r=self.run_analysis()
+        self.e.detect_extensionless(r)
+        self.e.clean_flat(r,{'.smi'})
+        folder=Path(r['run'])/'expanded'/SOURCES[0]/'작품'
+        self.assertTrue((folder/'subtitle_noext.smi').exists())
+
+        # Recovering against the original extensionless source must not strip .smi again.
+        self.e.recover_names_from_original(r,self.a,SOURCES[0],extractor=lambda a,d: None)
+        self.assertTrue((folder/'subtitle_noext.smi').exists())
+        self.assertFalse((folder/'subtitle_noext').exists())
+        rec=next(x for x in r['records'] if x['source']==SOURCES[0] and not x.get('actual'))
+        self.assertEqual(rec['name'],'subtitle_noext.smi')
+        self.assertEqual(rec.get('detected_extension'),'.smi')
+
+    def test_rerun_repairs_extension_stripped_by_previous_bug(self):
+        payload=b'<SAMI><BODY><SYNC Start=1000><P>hello'
+        self.put(self.a,'작품/subtitle_noext',payload)
+        r=self.run_analysis()
+        self.e.detect_extensionless(r)
+        self.e.clean_flat(r,{'.smi'})
+        folder=Path(r['run'])/'expanded'/SOURCES[0]/'작품'
+        rec=next(x for x in r['records'] if x['source']==SOURCES[0] and not x.get('actual'))
+
+        # Emulate the previous buggy recovery result: physical file + manifest lost .smi,
+        # while detected_extension from the earlier content scan is still preserved.
+        old=folder/'subtitle_noext.smi';broken=folder/'subtitle_noext'
+        old.rename(broken)
+        rec['name']='subtitle_noext'
+        rec['work']=str(broken.relative_to(Path(r['run'])))
+        rec['rel']='작품/subtitle_noext'
+        self.assertEqual(rec.get('detected_extension'),'.smi')
+
+        self.e.recover_names_from_original(r,self.a,SOURCES[0],extractor=lambda a,d: None)
+        self.assertTrue((folder/'subtitle_noext.smi').exists())
+        self.assertFalse((folder/'subtitle_noext').exists())
+        self.assertEqual(rec['name'],'subtitle_noext.smi')
+
+
 if __name__=='__main__':unittest.main()
