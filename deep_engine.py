@@ -1,7 +1,7 @@
 """Leaf-level deduplication and reconstruction of arbitrarily nested subtitle ZIPs."""
 import collections, hashlib, json, shutil, stat, tempfile, zipfile
 from pathlib import Path
-from engine import Engine as BaseEngine, SOURCES, Cancelled, sha, safe_member, metadata, report
+from engine import Engine as BaseEngine, SOURCES, Cancelled, sha, safe_member, metadata, report, fs_path, file_size, ensure_dir, copy2_file
 
 class Engine(BaseEngine):
     deep_mode = True
@@ -30,7 +30,7 @@ class Engine(BaseEngine):
             try:
                 if depth>8:raise ValueError('내부 ZIP 깊이 제한 초과')
                 children=[]
-                with zipfile.ZipFile(path) as z:
+                with zipfile.ZipFile(fs_path(path)) as z:
                     for index,item in enumerate(z.infolist()):
                         self.check();safe_member(item.filename)
                         if item.is_dir():continue
@@ -39,8 +39,8 @@ class Engine(BaseEngine):
                         total[0]+=item.file_size
                         if total[0]>2*1024**3:raise ValueError('내부 ZIP 누적 해제 한도 2GiB 초과')
                         counter[0]+=1;dest=root/'expanded'/f'{counter[0]:09d}'/Path(item.filename).name
-                        dest.parent.mkdir(parents=True,exist_ok=True)
-                        with z.open(item) as src,open(dest,'wb') as dst:
+                        ensure_dir(dest.parent)
+                        with z.open(item) as src,open(fs_path(dest),'wb') as dst:
                             while True:
                                 self.check();b=src.read(1024*1024)
                                 if not b:break
@@ -65,7 +65,7 @@ class Engine(BaseEngine):
             original=top['origin'].get('file') or top['origin']['archive']+'!/'+top['origin']['member']
             origin={'archive':original, 'member':rel.split('!/',1)[1], 'chain':chain}
         r={'source':top['source'],'rel':rel,'name':Path(rel.split('!/')[-1]).name,
-           'size':path.stat().st_size,'sha':sha(path),'title':title,'episode':ep,'uploader':uploader,
+           'size':file_size(path),'sha':sha(path),'title':title,'episode':ep,'uploader':uploader,
            'season':season,'origin':origin,'signature':'','inner_names':[],'error':error,'delete':False,
            'group':'','representative':'','reason':'','actual':False,'work':str(path.relative_to(root))}
         rid=len(run['records']);run['records'].append(r)
@@ -77,7 +77,7 @@ class Engine(BaseEngine):
         if node['kind']=='leaf':
             r=run['records'][node['record']]
             if r['delete']:return False
-            destination.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(root/r['work'],destination);return True
+            ensure_dir(destination.parent);copy2_file(root/r['work'],destination);return True
         # Rebuild children on disk instead of storing large archive payloads in RAM.
         temporary=Path(tempfile.mkdtemp(prefix='subtitle-members-',dir=root));members=[]
         try:
@@ -85,8 +85,8 @@ class Engine(BaseEngine):
                 p=temporary/f'{i:09d}'
                 if self.materialize(run,child,p):members.append((child['member'],p))
             if not members:return False
-            destination.parent.mkdir(parents=True,exist_ok=True)
-            with zipfile.ZipFile(destination,'w',zipfile.ZIP_DEFLATED,compresslevel=6,allowZip64=True) as z:
+            ensure_dir(destination.parent)
+            with zipfile.ZipFile(fs_path(destination),'w',zipfile.ZIP_DEFLATED,compresslevel=6,allowZip64=True) as z:
                 for name,p in members:self.check();z.write(p,name)
                 z.comment=bytes.fromhex(node.get('comment',''))
             return True
@@ -100,7 +100,7 @@ class Engine(BaseEngine):
             if sha(file)!=r['sha']:raise ValueError('보존 자막 SHA 불일치: '+r['rel'])
             return
         children=[c for c in node['children'] if self.survives(run,c)]
-        with zipfile.ZipFile(file) as z:
+        with zipfile.ZipFile(fs_path(file)) as z:
             infos=z.infolist()
             if len(infos)!=len(children):raise ValueError('내부 ZIP 개수 불일치')
             for child,info in zip(children,infos):
@@ -108,7 +108,7 @@ class Engine(BaseEngine):
                 import tempfile
                 with tempfile.TemporaryDirectory() as d:
                     p=Path(d)/'verify'
-                    with z.open(info) as src,open(p,'wb') as dst:shutil.copyfileobj(src,dst)
+                    with z.open(info) as src,open(fs_path(p),'wb') as dst:shutil.copyfileobj(src,dst)
                     self.verify_node(run,child,p)
 
     def survives(self,run,node):
