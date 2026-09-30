@@ -450,7 +450,8 @@ class Engine(BaseEngine):
                 dest=base.with_name(base.stem+f'__{k}'+base.suffix);k+=1
             os.replace(fs_path(old),fs_path(dest))
             before=r['name'];r['name']=dest.name;r['work']=str(dest.relative_to(root))
-            if not r.get('episode'):r['episode']=episode_hint(dest.name)
+            repaired_ep=episode_hint(dest.name)
+            if repaired_ep:r['episode']=repaired_ep
             r['filename_repaired_from']=before
             rows.append([r['source'],r.get('work_folder',''),before,dest.name,r.get('episode',''),r['work']])
             renamed+=1
