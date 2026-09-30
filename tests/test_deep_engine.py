@@ -318,4 +318,40 @@ class DeepTests(unittest.TestCase):
         self.assertTrue((Path(r['run'])/'subtitle_cleanup_report.xlsx').exists())
 
 
+    def test_recovers_name_from_original_zip_by_exact_sha(self):
+        original=self.root/'original-anissia';original.mkdir()
+        payload=b'exact subtitle bytes'
+        self.put(self.a,'작품/garbled-name.smi',payload)
+        self.put(original,'작품/pack.zip',zb([('folder/정상 자막 07화.smi',payload)]))
+        r=self.run_analysis()
+
+        self.e.recover_names_from_original(r,original,SOURCES[0])
+        folder=Path(r['run'])/'expanded'/SOURCES[0]/'작품'
+        self.assertFalse((folder/'garbled-name.smi').exists())
+        self.assertTrue((folder/'정상 자막 07화.smi').exists())
+        rec=next(x for x in r['records'] if x['source']==SOURCES[0] and x['name']=='정상 자막 07화.smi')
+        self.assertEqual(rec['episode'],'07')
+        self.assertEqual((folder/'정상 자막 07화.smi').read_bytes(),payload)
+        self.assertTrue((original/'작품/pack.zip').exists())
+        self.assertTrue((Path(r['run'])/'original_name_recovery.csv').exists())
+
+    def test_original_name_recovery_leaves_ambiguous_sha_unchanged(self):
+        original=self.root/'original-anissia';original.mkdir()
+        payload=b'same bytes under two original names'
+        self.put(self.a,'작품/broken.smi',payload)
+        self.put(original,'작품/pack.zip',zb([
+            ('A 01화.smi',payload),
+            ('B 01화.smi',payload),
+        ]))
+        r=self.run_analysis()
+
+        self.e.recover_names_from_original(r,original,SOURCES[0])
+        folder=Path(r['run'])/'expanded'/SOURCES[0]/'작품'
+        self.assertTrue((folder/'broken.smi').exists())
+        row=next(x for x in r['original_name_recovery'] if x['old_name']=='broken.smi')
+        self.assertEqual(row['result'],'복수 원본명: 보존')
+        self.assertIn('A 01화.smi',row['original_name'])
+        self.assertIn('B 01화.smi',row['original_name'])
+
+
 if __name__=='__main__':unittest.main()
