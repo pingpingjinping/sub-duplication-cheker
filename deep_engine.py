@@ -29,7 +29,7 @@ class Engine(BaseEngine):
             shutil.rmtree(fs_path(temp_root),ignore_errors=True)
 
     def work_folder(self, rel):
-        parts=Path(rel.replace('\\\\','/')).parts
+        parts=Path(rel.replace('\\','/')).parts
         # The selected source directory is the root; its immediate children are work folders.
         return parts[0] if len(parts)>1 else '_root'
 
