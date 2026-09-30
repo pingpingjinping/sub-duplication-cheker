@@ -2,7 +2,7 @@ import argparse, json, os, queue, subprocess, sys, threading, traceback
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from engine import Cancelled, SOURCES
+from engine import Cancelled, SOURCES, SUBS
 from deep_engine import Engine
 
 class App(tk.Tk):
@@ -28,7 +28,7 @@ class App(tk.Tk):
         ttk.Checkbutton(panel,text='소스 사이의 확정 중복도 대표본 하나만 남김',variable=self.cross).pack(anchor='w')
         ttk.Label(panel,text='해제본은 expanded/소스/작품명/ 바로 아래에 모입니다. 같은 이름은 __2 식으로 보존하고, 모든 확장자를 조사합니다.').pack(anchor='w',pady=5)
         actions=ttk.Frame(panel);actions.pack(fill='x',pady=6)
-        for label,fn in [('전체 압축 해제·확장자 조사',self.analyze),('작업 불러오기',self.load),('원래 구조 복원',self.restore),('결과 열기',self.open_output)]:
+        for label,fn in [('전체 압축 해제·확장자 조사',self.analyze),('선택 확장자 적용·중복 정리',self.choose_extensions_and_clean),('작업 불러오기',self.load),('원래 구조 복원',self.restore),('결과 열기',self.open_output)]:
             b=ttk.Button(actions,text=label,command=fn);b.pack(side='left',padx=3);self.controls.append(b)
         ttk.Button(actions,text='중지',command=self.stop.set).pack(side='right')
         self.bar=ttk.Progressbar(panel,mode='indeterminate');self.bar.pack(fill='x',pady=4)
@@ -72,6 +72,57 @@ class App(tk.Tk):
             self.events.put(('run',data))
             return data
         self.worker(automatic)
+    def choose_extensions_and_clean(self):
+        if not self.run_data or self.run_data.get('state')!='분석 완료':
+            messagebox.showinfo('정리','먼저 전체 압축 해제·확장자 조사를 완료하거나 작업을 불러오세요.')
+            return
+        records=self.run_data.get('records',[])
+        if not records:
+            messagebox.showinfo('정리','조사된 파일이 없습니다.');return
+        counts={}
+        for r in records:
+            ext=Path(r['name']).suffix.lower() or '(없음)'
+            counts[ext]=counts.get(ext,0)+1
+        exts=sorted(counts,key=lambda x:(x=='(없음)',x))
+
+        win=tk.Toplevel(self);win.title('남길 자막 확장자 선택');win.transient(self);win.grab_set()
+        win.geometry('460x560');win.minsize(380,420)
+        body=ttk.Frame(win,padding=14);body.pack(fill='both',expand=True)
+        ttk.Label(body,text='남길 확장자만 선택',font=('Malgun Gothic',13,'bold')).pack(anchor='w')
+        ttk.Label(body,text='선택하지 않은 확장자는 제거하고, 선택 파일은 작품 폴더 안에서 SHA-256이 같은 것만 하나 남깁니다.').pack(anchor='w',pady=(4,10))
+
+        frame=ttk.Frame(body);frame.pack(fill='both',expand=True)
+        lb=tk.Listbox(frame,selectmode='multiple',font=('Consolas',10),exportselection=False)
+        sb=ttk.Scrollbar(frame,orient='vertical',command=lb.yview);lb.configure(yscrollcommand=sb.set)
+        lb.pack(side='left',fill='both',expand=True);sb.pack(side='right',fill='y')
+        defaults=set(SUBS)-{'.txt'}
+        for i,ext in enumerate(exts):
+            lb.insert('end',f'{ext:<10} {counts[ext]:>8,}개')
+            if ext in defaults:lb.selection_set(i)
+
+        row=ttk.Frame(body);row.pack(fill='x',pady=(10,0))
+        ttk.Button(row,text='전부 선택',command=lambda:lb.selection_set(0,'end')).pack(side='left')
+        ttk.Button(row,text='전부 해제',command=lambda:lb.selection_clear(0,'end')).pack(side='left',padx=5)
+
+        def execute():
+            selected=[exts[i] for i in lb.curselection()]
+            if not selected:
+                messagebox.showinfo('확장자','남길 확장자를 하나 이상 선택하세요.',parent=win);return
+            keep=sum(counts[x] for x in selected);remove=len(records)-keep
+            names=', '.join(selected)
+            if not messagebox.askyesno(
+                '정리 확인',
+                f'남길 확장자: {names}\\n\\n선택 확장자 파일 {keep:,}개를 대상으로 작품 폴더별 SHA 중복을 제거합니다.\\n'
+                f'선택하지 않은 파일 {remove:,}개도 작업 해제본에서 제거합니다.\\n\\n'
+                '원본과 original_copy는 건드리지 않으며 ZIP으로 다시 압축하지 않습니다.',
+                parent=win
+            ):return
+            win.destroy()
+            self.worker(lambda e:e.clean_flat(self.run_data,selected))
+
+        ttk.Button(row,text='정리 실행',command=execute).pack(side='right')
+        ttk.Button(row,text='취소',command=win.destroy).pack(side='right',padx=5)
+
     def apply(self):
         if not self.run_data or self.run_data['state']!='분석 완료':messagebox.showinfo('분석','먼저 분석을 완료하세요.');return
         n=sum(r['delete'] for r in self.run_data['records']);size=sum(r['size'] for r in self.run_data['records'] if r['delete'])/1024**2
@@ -99,9 +150,9 @@ class App(tk.Tk):
         self.tree.delete(*self.tree.get_children())
         if not self.run_data:return
         rs=self.run_data['records']; n=sum(r['delete'] for r in rs)
-        self.status.set(f'{self.run_data["state"]} | 전체 {len(rs):,}개 | 확정 중복 후보 {n:,}개 | 실제 삭제 {sum(r["actual"] for r in rs):,}개 | 검토 {len(self.run_data.get("reviews",[])):,}건')
+        self.status.set(f'{self.run_data["state"]} | 전체 {len(rs):,}개 | 정리 대상 {n:,}개 | 실제 제거 {sum(r["actual"] for r in rs):,}개 | 검토 {len(self.run_data.get("reviews",[])):,}건')
         for r in rs:
-            if r['group'] or r['error']:
+            if r['group'] or r['error'] or r['actual']:
                 self.tree.insert('','end',values=(r['group'],'삭제' if r['actual'] else ('삭제 후보' if r['delete'] else '보존'),r['source']+'/'+r['rel'],r['representative'],r['error'] or r['reason']))
     def sort(self,k):
         items=sorted((self.tree.set(i,k),i) for i in self.tree.get_children())
