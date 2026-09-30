@@ -428,7 +428,7 @@ class Engine(BaseEngine):
         for r in run.get('records',[]):
             if r.get('actual'):continue
             old=root/r.get('work','')
-            if not old.exists():continue
+            if not os.path.exists(fs_path(old)):continue
             new_name=repair_legacy_zip_name(r.get('name',old.name),0)
             if new_name!=r.get('name',old.name):
                 out.append((r,new_name))
@@ -470,6 +470,8 @@ class Engine(BaseEngine):
         active={s:[Path(p).resolve() for p in inputs.get(s,[]) if str(p)] for s in SOURCES}
         active={s:ps for s,ps in active.items() if ps}
         if len(active)<2:raise ValueError('교차 중복 정리는 최소 2개 소스 폴더가 필요합니다.')
+        if any(len(paths)!=1 for paths in active.values()):
+            raise ValueError('세 소스 최종 교차중복은 소스별로 정리 끝난 폴더를 하나씩 선택하세요.')
         for source,paths in active.items():
             for p in paths:
                 if not p.is_dir():raise ValueError(f'{source}: 폴더를 선택하세요: {p}')
