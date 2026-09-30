@@ -171,10 +171,10 @@ class Engine(BaseEngine):
         counter=[0];temp_root=root/'_extensionless_zip_tmp';ensure_dir(temp_root)
         try:
             for i,r in enumerate(targets,1):
-                self.check();old=root/r['work'];old_work=r['work']
+                self.check();old=root/r['work'];old_work=r['work'];old_display=str(old_work).replace('\\\\','/')
                 if not os.path.exists(fs_path(old)):
                     missing+=1
-                    rows.append([r['source'],r.get('work_folder',''),old_work,'missing','','',old_work,'파일 없음'])
+                    rows.append([r['source'],r.get('work_folder',''),old_display,'missing','','',old_display,'파일 없음'])
                     continue
                 if sha(old)!=r['sha']:raise ValueError('해제 파일 변경됨: '+str(old))
                 size=file_size(old)
@@ -193,7 +193,7 @@ class Engine(BaseEngine):
                 if not ext:
                     unknown+=1
                     r['detected_extension']='';r['detected_kind']=kind;r['extension_detection']=reason
-                    rows.append([r['source'],r.get('work_folder',''),old_work,kind,'','',old_work,reason])
+                    rows.append([r['source'],r.get('work_folder',''),old_display,kind,'','',old_display,reason])
                     continue
 
                 new=collision_name(old,ext)
@@ -229,7 +229,7 @@ class Engine(BaseEngine):
                         r['archive_extracted']=False
                         r['extension_detection']=reason+' / 해제 보류: '+str(e)
 
-                rows.append([r['source'],r.get('work_folder',''),old_work,kind,ext,action,r['work'],r['extension_detection']])
+                rows.append([r['source'],r.get('work_folder',''),old_display,kind,ext,action,str(r['work']).replace('\\\\','/'),r['extension_detection']])
                 if i%100==0:self.log(f'무확장자 판별: {i:,}/{len(targets):,}')
         finally:
             shutil.rmtree(fs_path(temp_root),ignore_errors=True)
