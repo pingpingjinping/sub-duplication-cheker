@@ -1,7 +1,7 @@
 import io, tempfile, unittest, zipfile
 from pathlib import Path
 from deep_engine import Engine
-from engine import SOURCES, sha
+from engine import SOURCES, sha, repair_legacy_zip_name, episode_hint, canonical_work_name
 
 def zb(files):
     b=io.BytesIO()
@@ -258,5 +258,64 @@ class DeepTests(unittest.TestCase):
         self.assertEqual(font.get('external_archive_skip'),'font')
         self.assertTrue((Path(r['run'])/'remaining_archive_extraction.csv').exists())
         self.assertTrue(r['remaining_archives_scanned'])
+
+    def test_legacy_cp949_filename_repair_and_episode_hint(self):
+        original='한글 자막 01화.smi'
+        broken=original.encode('cp949').decode('cp437')
+        self.assertNotEqual(broken,original)
+        self.assertEqual(repair_legacy_zip_name(broken,0),original)
+        self.assertEqual(repair_legacy_zip_name(original,0),original)
+        self.assertEqual(episode_hint('01.smi'),'1')
+        self.assertEqual(episode_hint('[03] subtitle.srt'),'3')
+        self.assertEqual(episode_hint('Season 2 - 04.ass'),'4')
+        self.assertEqual(episode_hint('video 1080p.smi'),'')
+        self.assertEqual(canonical_work_name('작품 1기 (2024)'),canonical_work_name('작품'))
+
+    def test_repairs_already_expanded_mojibake_without_rescan(self):
+        original='한글 자막 02화.smi'
+        broken=original.encode('cp949').decode('cp437')
+        self.put(self.a,'작품/'+broken,b'subtitle')
+        r=self.run_analysis()
+        folder=Path(r['run'])/'expanded'/SOURCES[0]/'작품'
+        self.assertTrue((folder/broken).exists())
+        self.e.repair_broken_filenames(r)
+        self.assertTrue((folder/original).exists())
+        rec=next(x for x in r['records'] if x['name']==original)
+        self.assertEqual(rec['episode'],'02')
+        self.assertEqual((folder/original).read_bytes(),b'subtitle')
+        self.assertTrue((Path(r['run'])/'filename_repair.csv').exists())
+
+    def test_final_cross_source_cleanup_is_safe_and_conservative(self):
+        anissia=self.root/'final-anissia';aniall=self.root/'final-aniall';naver=self.root/'final-naver'
+        for p in (anissia,aniall,naver):p.mkdir()
+        same=b'exact same subtitle'
+        alias=b'exact same alias subtitle'
+        self.put(anissia,'작품 A/01.smi',same)
+        self.put(aniall,'작품A/renamed.srt',same)
+        self.put(naver,'작품 A (2024)/01.smi',same)
+        self.put(anissia,'작품 A/02.smi',b'sync-a')
+        self.put(aniall,'작품A/02.smi',b'sync-b')
+        self.put(anissia,'한글별칭/03.smi',alias)
+        self.put(aniall,'English Alias/03.smi',alias)
+
+        inputs={SOURCES[0]:[anissia],SOURCES[1]:[aniall],SOURCES[2]:[naver]}
+        r=self.e.cross_source_cleanup(inputs,self.root/'cross-out')
+        out=Path(r['run'])/'cross_cleaned'
+        self.assertTrue((out/SOURCES[0]/'작품 A'/'01.smi').exists())
+        self.assertFalse((out/SOURCES[1]/'작품A'/'renamed.srt').exists())
+        self.assertFalse((out/SOURCES[2]/'작품 A (2024)'/'01.smi').exists())
+        self.assertTrue((out/SOURCES[0]/'작품 A'/'02.smi').exists())
+        self.assertTrue((out/SOURCES[1]/'작품A'/'02.smi').exists())
+        # Same SHA but unmatched/aliased work names are review-only.
+        self.assertTrue((out/SOURCES[0]/'한글별칭'/'03.smi').exists())
+        self.assertTrue((out/SOURCES[1]/'English Alias'/'03.smi').exists())
+        self.assertEqual(sum(x['actual'] for x in r['records']),2)
+        self.assertEqual(len(r['cross_source_review']),1)
+        # Inputs remain untouched.
+        self.assertTrue((aniall/'작품A'/'renamed.srt').exists())
+        self.assertTrue((naver/'작품 A (2024)'/'01.smi').exists())
+        self.assertTrue((Path(r['run'])/'cross_source_cleanup.csv').exists())
+        self.assertTrue((Path(r['run'])/'subtitle_cleanup_report.xlsx').exists())
+
 
 if __name__=='__main__':unittest.main()

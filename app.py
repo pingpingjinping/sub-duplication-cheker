@@ -27,10 +27,14 @@ class App(tk.Tk):
         b=ttk.Button(row,text='선택',command=self.choose_output);b.pack(side='left');self.controls.append(b)
         ttk.Checkbutton(panel,text='소스 사이의 확정 중복도 대표본 하나만 남김',variable=self.cross).pack(anchor='w')
         ttk.Label(panel,text='해제본은 expanded/소스/작품명/ 바로 아래에 모입니다. 같은 이름은 __2 식으로 보존하고, 모든 확장자를 조사합니다.').pack(anchor='w',pady=5)
-        actions=ttk.Frame(panel);actions.pack(fill='x',pady=6)
-        for label,fn in [('전체 압축 해제·확장자 조사',self.analyze),('무확장자 형식 판별',self.detect_extensionless),('남은 압축파일 해제',self.extract_remaining_archives),('선택 확장자 적용·중복 정리',self.choose_extensions_and_clean),('작업 불러오기',self.load),('원래 구조 복원',self.restore),('결과 열기',self.open_output)]:
+        actions=ttk.Frame(panel);actions.pack(fill='x',pady=(6,2))
+        for label,fn in [('전체 압축 해제·확장자 조사',self.analyze),('무확장자 형식 판별',self.detect_extensionless),('남은 압축파일 해제',self.extract_remaining_archives),('선택 확장자 적용·중복 정리',self.choose_extensions_and_clean),('작업 불러오기',self.load),('결과 열기',self.open_output)]:
             b=ttk.Button(actions,text=label,command=fn);b.pack(side='left',padx=3);self.controls.append(b)
         ttk.Button(actions,text='중지',command=self.stop.set).pack(side='right')
+        advanced=ttk.Frame(panel);advanced.pack(fill='x',pady=(2,6))
+        for label,fn in [('깨진 ZIP 파일명 복구',self.repair_broken_filenames),('세 소스 최종 교차중복',self.cross_source_cleanup),('원래 구조 복원',self.restore)]:
+            b=ttk.Button(advanced,text=label,command=fn);b.pack(side='left',padx=3);self.controls.append(b)
+        ttk.Label(advanced,text='교차중복: 각 소스 칸에 정리 끝난 expanded\\<source> 폴더를 넣고 실행').pack(side='left',padx=10)
         self.bar=ttk.Progressbar(panel,mode='indeterminate');self.bar.pack(fill='x',pady=4)
         ttk.Label(panel,textvariable=self.status).pack(anchor='w',pady=3)
         tabs=ttk.Notebook(panel);tabs.pack(fill='both',expand=True)
@@ -103,6 +107,48 @@ class App(tk.Tk):
             '압축 원본 자체는 지우지 않습니다.'
         ):return
         self.worker(lambda e:e.extract_remaining_archives(self.run_data,bz))
+
+    def repair_broken_filenames(self):
+        if not self.run_data or self.run_data.get('version')!=2 or self.run_data.get('state') not in ('분석 완료','정리 완료'):
+            messagebox.showinfo('파일명 복구','분석 완료 또는 평탄화 정리 완료 작업을 먼저 불러오세요.')
+            return
+        probe=Engine()
+        targets=probe.filename_repair_candidates(self.run_data)
+        if not targets:
+            messagebox.showinfo('파일명 복구','CP949로 안전하게 복구할 수 있는 깨진 파일명이 없습니다.')
+            return
+        examples='\\n'.join(f'{r["name"]} → {new}' for r,new in targets[:5])
+        if not messagebox.askyesno(
+            '깨진 ZIP 파일명 복구',
+            f'CP949/옛 ZIP 인코딩으로 깨진 것으로 확인되는 파일명 {len(targets):,}개를 복구합니다.\\n\\n'
+            f'{examples}'+('\\n...' if len(targets)>5 else '')+
+            '\\n\\n파일 내용/SHA는 건드리지 않고 expanded의 파일명과 manifest만 갱신합니다.'
+        ):return
+        self.worker(lambda e:e.repair_broken_filenames(self.run_data))
+
+    def cross_source_cleanup(self):
+        inputs={s:list(ps) for s,ps in self.inputs.items() if ps}
+        if len(inputs)<2:
+            messagebox.showinfo('교차중복','최소 2개 소스 칸에 정리 끝난 expanded/<source> 폴더를 추가하세요.')
+            return
+        bad=[p for ps in inputs.values() for p in ps if not Path(p).is_dir()]
+        if bad:
+            messagebox.showinfo('교차중복','세 소스 최종 교차중복은 ZIP이 아니라 정리 끝난 폴더를 선택해야 합니다.')
+            return
+        if any(len(ps)!=1 for ps in inputs.values()):
+            messagebox.showinfo('교차중복','각 소스 칸에는 정리 끝난 expanded/<source> 폴더를 하나씩만 넣어주세요.')
+            return
+        counts=', '.join(f'{s}: {len(ps)}개 폴더' for s,ps in inputs.items())
+        if not messagebox.askyesno(
+            '세 소스 최종 교차중복',
+            f'{counts}\\n\\n'
+            '각 폴더를 새 CrossSourceCleanup 작업으로 복사한 뒤, 작품 폴더명이 보수적으로 매칭되고 SHA-256까지 완전히 같은 자막만 교차 중복으로 제거합니다.\\n'
+            '우선순위는 Anissia → AniAll → Naverblog 입니다.\\n'
+            'SHA가 같아도 작품 폴더명이 다르면 자동 삭제하지 않고 검토 목록에 남깁니다.\\n\\n'
+            '입력 폴더는 수정하지 않습니다.'
+        ):return
+        output=self.output.get()
+        self.worker(lambda e:e.cross_source_cleanup(inputs,output))
 
     def choose_extensions_and_clean(self):
         if not self.run_data or self.run_data.get('state')!='분석 완료':

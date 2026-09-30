@@ -42,6 +42,52 @@ def sha(path):
 def normal(s):
     return re.sub(r'[^\w]', '', unicodedata.normalize('NFKC', s).casefold())
 
+def repair_legacy_zip_name(name, flag_bits=0):
+    """Recover CP949 names that a legacy ZIP decoded as CP437."""
+    if flag_bits & 0x800:
+        return name
+    try:
+        candidate = name.encode('cp437').decode('cp949')
+    except (UnicodeEncodeError, UnicodeDecodeError, LookupError):
+        return name
+    def hangul_count(s):
+        return sum('\uac00' <= ch <= '\ud7a3' for ch in s)
+    if hangul_count(candidate) > hangul_count(name) and hangul_count(candidate) > 0:
+        return candidate
+    return name
+
+def episode_hint(text):
+    """Conservative episode hint for names such as 01.smi even if Korean text is mojibake."""
+    stem = Path(str(text).replace('\\', '/').split('!/')[-1]).stem
+    explicit = list(re.finditer(r'(\d{1,3})\s*(?:화|회)|(?:ep|episode)[ ._-]*0*(\d{1,3})', stem, re.I))
+    if explicit:
+        m = explicit[-1]
+        return next((x for x in m.groups() if x is not None), '')
+    candidates = []
+    for m in re.finditer(r'(?<![A-Za-z0-9])0*(\d{1,3})(?!\d)', stem):
+        start, end = m.span()
+        prefix = stem[max(0, start-10):start].casefold()
+        suffix = stem[end:end+4].casefold()
+        if re.search(r'(?:season|시즌)\s*$', prefix) or prefix.endswith('v'):
+            continue
+        if suffix.startswith('p') or suffix.startswith('bit'):
+            continue
+        if int(m.group(1)) > 400:
+            continue
+        candidates.append(m.group(1))
+    return candidates[-1] if candidates else ''
+
+def canonical_work_name(name):
+    """Conservative work-folder key used only together with an exact SHA match."""
+    s = unicodedata.normalize('NFKC', str(name)).casefold()
+    s = re.sub(r'\((?:19|20)\d{2}\)|\[(?:19|20)\d{2}\]|(?<!\d)(?:19|20)\d{2}(?!\d)', ' ', s)
+    s = re.sub(r'(?:season|시즌)\s*0*(\d+)', lambda m: ' s'+str(int(m.group(1)))+' ', s)
+    s = re.sub(r'(?<!\w)s0*(\d+)(?!\d)', lambda m: ' s'+str(int(m.group(1)))+' ', s)
+    s = re.sub(r'0*(\d+)\s*기', lambda m: ' s'+str(int(m.group(1)))+' ', s)
+    s = re.sub(r'(?<!\w)s1(?!\w)', ' ', s)
+    s = re.sub(r'(?:[_\-\s]+자막)$', ' ', s)
+    return normal(s)
+
 def common(path):
     n = normal(Path(path).name)
     return Path(path).suffix.lower() in {'.ttf', '.otf', '.woff', '.woff2'} or any(x in n for x in ('폰트', 'font', 'readme', '읽어'))
@@ -63,26 +109,26 @@ def payload_signature(path, check=lambda: None, max_bytes=2 * 1024**3):
     def walk(z, prefix='', depth=0):
         if depth > 8: raise ValueError('내부 ZIP 깊이 제한 초과')
         for item in z.infolist():
-            check(); safe_member(item.filename)
+            check(); member_name = repair_legacy_zip_name(item.filename, item.flag_bits); safe_member(member_name)
             if item.is_dir(): continue
             if item.flag_bits & 1: raise ValueError('암호화 ZIP')
             total[0] += item.file_size
             if total[0] > max_bytes: raise ValueError('내부 ZIP 검사 용량 제한 초과')
             with z.open(item) as f:
-                if item.filename.lower().endswith('.zip'):
+                if member_name.lower().endswith('.zip'):
                     with tempfile.SpooledTemporaryFile(max_size=16*1024**2) as data:
                         while True:
                             check(); block=f.read(1024*1024)
                             if not block: break
                             data.write(block)
                         data.seek(0)
-                        with zipfile.ZipFile(data) as inner: walk(inner, prefix + item.filename + '!/', depth + 1)
+                        with zipfile.ZipFile(data) as inner: walk(inner, prefix + member_name + '!/', depth + 1)
                 else:
                     h = hashlib.sha256(); size = 0
                     for b in iter(lambda: f.read(1024 * 1024), b''):
                         check(); size += len(b); h.update(b)
                     leaves.append((size, h.hexdigest()))
-                    if Path(item.filename).suffix.lower() in SUBS: subtitle_names.append(prefix + item.filename)
+                    if Path(member_name).suffix.lower() in SUBS: subtitle_names.append(prefix + member_name)
     with zipfile.ZipFile(path) as z: walk(z)
     if not leaves: return '', subtitle_names
     return hashlib.sha256(json.dumps(sorted(leaves), separators=(',', ':')).encode()).hexdigest(), subtitle_names
@@ -92,6 +138,8 @@ def metadata(rel):
     while parts and parts[0].casefold() in SOURCES: parts.pop(0)
     title = parts[0] if len(parts) > 1 else ''
     episode = next((x for x in parts[1:-1] if re.search(r'\d+\s*(화|회|ep)', x, re.I)), '')
+    if not episode and parts:
+        episode = episode_hint(parts[-1])
     uploader = '/'.join(parts[2:-1]) if len(parts) > 3 else ''
     season = re.search(r'(?:시즌\s*|s)(\d+)|(\d+)\s*기', title, re.I)
     return title, episode, uploader, season.group(0) if season else ''
@@ -161,7 +209,7 @@ class Engine:
                         run['archives'].append({'file': str(p), 'sha': sha(p), 'size': p.stat().st_size})
                         with zipfile.ZipFile(p) as z:
                             for index, info in enumerate(z.infolist()):
-                                self.check(); member = safe_member(info.filename)
+                                self.check(); member_name = repair_legacy_zip_name(info.filename, info.flag_bits); member = safe_member(member_name)
                                 mode = info.external_attr >> 16
                                 if stat.S_ISLNK(mode): raise ValueError('ZIP 심볼릭 링크는 지원하지 않습니다.')
                                 if info.is_dir(): continue
@@ -421,8 +469,18 @@ def report(run):
         rows=[['소스','작품 폴더','압축파일 작업 경로','압축파일명','결과','추가 파일 수','오류']]
         rows += [[x.get('source',''),x.get('work_folder',''),x.get('archive_path',''),x.get('archive_name',''),x.get('result',''),x.get('added_files',0),x.get('error','')] for x in run.get('remaining_archive_extraction',[])]
         sheets.append(('남은압축해제',rows))
+    if run.get('filename_repairs') is not None:
+        rows=[['소스','작품 폴더','깨진 파일명','복구 파일명','회차 보조값','현재 작업 경로']]
+        rows += [[x.get('source',''),x.get('work_folder',''),x.get('old_name',''),x.get('new_name',''),x.get('episode',''),x.get('work','')] for x in run.get('filename_repairs',[])]
+        sheets.append(('파일명복구',rows))
+    if run.get('cross_source_review') is not None:
+        rows=[['SHA-256','사유','작품 폴더','경로']]
+        rows += [[x.get('sha',''),x.get('reason',''),' | '.join(x.get('works',[])),' | '.join(x.get('paths',[]))] for x in run.get('cross_source_review',[])]
+        sheets.append(('교차검토',rows))
     if run.get('version')==2 and run.get('cleanup_mode')!='flat_whitelist':
         sheets.append(('ZIP재구성',[['원래 ZIP 경로','처리 결과']]+[[x['path'],x['result']] for x in run.get('containers',[])]))
     elif run.get('cleanup_mode')=='flat_whitelist':
         sheets.append(('정리설정',[['항목','값'],['정리 방식','작품 폴더 평탄화 + 선택 확장자 + 폴더 내 SHA 중복 제거'],['선택 확장자',', '.join(run.get('selected_extensions',[]))],['최종 위치','expanded/소스/작품명/'],['ZIP 재생성','하지 않음']]))
+    elif run.get('cleanup_mode')=='cross_source_final':
+        sheets.append(('정리설정',[['항목','값'],['정리 방식','세 소스 최종 복사본 + 매칭 작품 내 교차 SHA 중복 제거'],['소스 우선순위',' > '.join(run.get('source_priority',SOURCES))],['최종 위치','cross_cleaned/소스/작품명/'],['원본 수정','하지 않음']]))
     tmp=Path(run['run'])/'subtitle_cleanup_report.tmp.xlsx'; xlsx(tmp,sheets);tmp.replace(Path(run['run'])/'subtitle_cleanup_report.xlsx')
