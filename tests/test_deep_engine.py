@@ -82,4 +82,23 @@ class DeepTests(unittest.TestCase):
         p=Path(r['run'])/'cleaned'/SOURCES[0]/'작품/bundle.zip.members/a.smi'
         self.assertEqual(p.read_bytes(),b'unique')
 
+    def test_extension_inventory_includes_every_extracted_leaf_type(self):
+        self.put(self.a,'작품/bundle.zip',zb([
+            ('1.smi',b'subtitle'),
+            ('font.ttf',b'font'),
+            ('readme.txt',b'readme'),
+            ('LICENSE',b'license'),
+            ('nested.zip',zb([('2.ass',b'ass-subtitle'),('cover.jpg',b'image')]))
+        ]))
+        r=self.run_analysis()
+        self.assertEqual(r['state'],'분석 완료')
+        self.assertFalse((Path(r['run'])/'cleaned').exists())
+        self.assertTrue((Path(r['run'])/'original_copy').exists())
+        inventory=(Path(r['run'])/'extension_inventory.csv').read_text(encoding='utf-8-sig')
+        for ext in ('.smi','.ass','.ttf','.txt','.jpg','(없음)'):
+            self.assertIn(ext,inventory)
+        # Survey stage must not remove or filter anything.
+        self.assertEqual(len(r['records']),6)
+        self.assertTrue((self.a/'작품/bundle.zip').exists())
+
 if __name__=='__main__':unittest.main()
