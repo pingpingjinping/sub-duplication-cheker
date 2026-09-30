@@ -1,7 +1,7 @@
 import argparse, json, os, queue, subprocess, sys, threading, traceback
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 from engine import Cancelled, SOURCES, SUBS
 from deep_engine import Engine
 
@@ -32,7 +32,7 @@ class App(tk.Tk):
             b=ttk.Button(actions,text=label,command=fn);b.pack(side='left',padx=3);self.controls.append(b)
         ttk.Button(actions,text='중지',command=self.stop.set).pack(side='right')
         advanced=ttk.Frame(panel);advanced.pack(fill='x',pady=(2,6))
-        for label,fn in [('깨진 ZIP 파일명 복구',self.repair_broken_filenames),('세 소스 최종 교차중복',self.cross_source_cleanup),('원래 구조 복원',self.restore)]:
+        for label,fn in [('깨진 ZIP 파일명 복구',self.repair_broken_filenames),('원본 비교 이름 복구',self.recover_names_from_original),('세 소스 최종 교차중복',self.cross_source_cleanup),('원래 구조 복원',self.restore)]:
             b=ttk.Button(advanced,text=label,command=fn);b.pack(side='left',padx=3);self.controls.append(b)
         ttk.Label(advanced,text='교차중복: 각 소스 칸에 정리 끝난 expanded\\<source> 폴더를 넣고 실행').pack(side='left',padx=10)
         self.bar=ttk.Progressbar(panel,mode='indeterminate');self.bar.pack(fill='x',pady=4)
@@ -125,6 +125,38 @@ class App(tk.Tk):
             '\\n\\n파일 내용/SHA는 건드리지 않고 expanded의 파일명과 manifest만 갱신합니다.'
         ):return
         self.worker(lambda e:e.repair_broken_filenames(self.run_data))
+
+    def recover_names_from_original(self):
+        if not self.run_data or self.run_data.get('version')!=2 or self.run_data.get('state') not in ('분석 완료','정리 완료'):
+            messagebox.showinfo('원본 비교 이름 복구','분석 완료 또는 평탄화 정리 완료 작업을 먼저 불러오세요.')
+            return
+        original=filedialog.askdirectory(title='원본 소스 폴더 선택')
+        if not original:return
+        present=[s for s in SOURCES if any(r.get('source')==s and not r.get('actual') for r in self.run_data.get('records',[]))]
+        base=Path(original).name.casefold()
+        source=next((s for s in present if s.casefold()==base),None)
+        if not source and len(present)==1:
+            source=present[0]
+        if not source:
+            source=simpledialog.askstring(
+                '소스 선택',
+                '이 원본 폴더가 어느 소스인지 입력하세요.\n'+' / '.join(present or SOURCES),
+                parent=self
+            )
+            if not source:return
+            source=source.strip()
+            if source not in SOURCES:
+                messagebox.showinfo('소스 선택','anissia_subtitles / aniall_subtitles / naverblog_subtitles 중 하나를 정확히 입력하세요.')
+                return
+        n=sum(r.get('source')==source and not r.get('actual') for r in self.run_data.get('records',[]))
+        if not messagebox.askyesno(
+            '원본 비교 이름 복구',
+            f'{source}의 현재 expanded 파일 {n:,}개를 원본 폴더와 비교합니다.\n\n'
+            '원본 일반 파일과 ZIP/중첩 ZIP 내부 파일을 SHA-256으로 비교하고, 같은 작품 폴더에서 내용이 완전히 같은 원본 파일명이 하나로 확정될 때만 이름을 복구합니다.\n'
+            '같은 내용에 원본 이름이 여러 개면 자동 변경하지 않고 보고서에 남깁니다.\n\n'
+            '원본 폴더와 파일 내용은 수정하지 않습니다.'
+        ):return
+        self.worker(lambda e:e.recover_names_from_original(self.run_data,original,source))
 
     def cross_source_cleanup(self):
         inputs={s:list(ps) for s,ps in self.inputs.items() if ps}

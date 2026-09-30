@@ -473,6 +473,10 @@ def report(run):
         rows=[['소스','작품 폴더','깨진 파일명','복구 파일명','회차 보조값','현재 작업 경로']]
         rows += [[x.get('source',''),x.get('work_folder',''),x.get('old_name',''),x.get('new_name',''),x.get('episode',''),x.get('work','')] for x in run.get('filename_repairs',[])]
         sheets.append(('파일명복구',rows))
+    if run.get('original_name_recovery') is not None:
+        rows=[['소스','작품 폴더','현재 파일명','원본 파일명','처리','원본 위치','SHA-256']]
+        rows += [[x.get('source',''),x.get('work_folder',''),x.get('old_name',''),x.get('original_name',''),x.get('result',''),x.get('original_path',''),x.get('sha','')] for x in run.get('original_name_recovery',[])]
+        sheets.append(('원본이름복구',rows))
     if run.get('cross_source_review') is not None:
         rows=[['SHA-256','사유','작품 폴더','경로']]
         rows += [[x.get('sha',''),x.get('reason',''),' | '.join(x.get('works',[])),' | '.join(x.get('paths',[]))] for x in run.get('cross_source_review',[])]
