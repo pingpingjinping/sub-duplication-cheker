@@ -135,6 +135,9 @@ class App(tk.Tk):
         if bad:
             messagebox.showinfo('교차중복','세 소스 최종 교차중복은 ZIP이 아니라 정리 끝난 폴더를 선택해야 합니다.')
             return
+        if any(len(ps)!=1 for ps in inputs.values()):
+            messagebox.showinfo('교차중복','각 소스 칸에는 정리 끝난 expanded/<source> 폴더를 하나씩만 넣어주세요.')
+            return
         counts=', '.join(f'{s}: {len(ps)}개 폴더' for s,ps in inputs.items())
         if not messagebox.askyesno(
             '세 소스 최종 교차중복',
