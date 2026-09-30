@@ -413,6 +413,10 @@ def report(run):
         w.writerows(extension_rows)
     # Long path groups are row-based so no group list is silently truncated in a cell.
     sheets=[('요약',summary),('확장자조사',extension_rows),('삭제내역',deleted),('보존파일',kept),('검토필요',reviews),('오배치',misplaced),('공용첨부',shared),('교차비교',cross)]
+    if run.get('extensionless_detection') is not None:
+        rows=[['소스','작품 폴더','원래 작업 경로','판별 확장자','현재 작업 경로','판별 근거']]
+        rows += [[x.get('source',''),x.get('work_folder',''),x.get('old_path',''),x.get('detected_extension',''),x.get('new_path',''),x.get('reason','')] for x in run.get('extensionless_detection',[])]
+        sheets.append(('무확장자판별',rows))
     if run.get('version')==2 and run.get('cleanup_mode')!='flat_whitelist':
         sheets.append(('ZIP재구성',[['원래 ZIP 경로','처리 결과']]+[[x['path'],x['result']] for x in run.get('containers',[])]))
     elif run.get('cleanup_mode')=='flat_whitelist':
