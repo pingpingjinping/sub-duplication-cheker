@@ -163,14 +163,8 @@ class Engine(BaseEngine):
                 os.unlink(fs_path(p));r['actual']=True
                 if (i+1)%100==0:self.save(run)
 
-            # Remove empty work directories only; source directories remain.
-            expanded=root/'expanded'
-            if expanded.exists():
-                dirs=sorted((p for p in expanded.rglob('*') if p.is_dir()),
-                            key=lambda p:len(p.parts),reverse=True)
-                for p in dirs:
-                    try:os.rmdir(fs_path(p))
-                    except OSError:pass
+            # Empty work folders may remain. Avoid a second recursive filesystem walk here:
+            # very long Windows paths are already represented safely by the manifest.
 
             for r in run['records']:
                 self.check();p=root/r['work']
