@@ -1,5 +1,5 @@
 """Leaf-level deduplication and reconstruction of arbitrarily nested subtitle ZIPs."""
-import collections, hashlib, json, shutil, stat, tempfile, zipfile
+import collections, hashlib, json, os, shutil, stat, tempfile, zipfile
 from pathlib import Path
 from engine import Engine as BaseEngine, SOURCES, Cancelled, sha, safe_member, metadata, report, fs_path, file_size, ensure_dir, copy2_file
 
@@ -10,7 +10,7 @@ class Engine(BaseEngine):
         run = super().analyze(inputs, output, cross)
         root=Path(run['run']); (root/'cleaned').rename(root/'original_copy')
         run['top_records']=run['records'];run['records']=[];run['trees']=[]
-        run['version']=3;run['state']='작품 폴더별 압축 해제 중';self.save(run)
+        run['version']=2;run['state']='작품 폴더별 압축 해제 중';self.save(run)
         counter=[0]
         temp_root=root/'_expand_tmp'
         ensure_dir(temp_root)
@@ -38,7 +38,7 @@ class Engine(BaseEngine):
         ensure_dir(folder)
         base=folder/Path(name).name
         dest=base;k=2
-        while Path(fs_path(dest)).exists():
+        while os.path.exists(fs_path(dest)):
             dest=base.with_name(base.stem+f'__{k}'+base.suffix);k+=1
         return dest
 
