@@ -203,7 +203,7 @@ class DeepTests(unittest.TestCase):
 
         def detected(name):
             return next(x for x in r['extensionless_detection']
-                        if x['old_path'].replace('\\\\','/').endswith('/'+name))
+                        if x['old_path'].replace('\\','/').endswith('/'+name))
         self.assertEqual(detected('archive_noext')['kind'],'archive')
         self.assertIn('ZIP 재귀 해제',detected('archive_noext')['action'])
         self.assertEqual(detected('seven_noext')['detected_extension'],'.7z')
