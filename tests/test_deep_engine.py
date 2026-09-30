@@ -465,4 +465,56 @@ class DeepTests(unittest.TestCase):
             self.e.clean_flat(r,{'.smi'})
 
 
+    def test_flat_cleanup_retries_permission_error_on_delete(self):
+        import deep_engine
+        from unittest.mock import patch
+        self.put(self.a,'작품/pack.zip',zb([
+            ('01.smi',b'subtitle'),
+            ('locked.ttf',b'font')
+        ]))
+        r=self.run_analysis()
+        real_unlink=deep_engine.os.unlink
+        calls={'n':0}
+        def flaky_unlink(path):
+            if str(path).endswith('locked.ttf') and calls['n']==0:
+                calls['n']+=1
+                raise PermissionError(5,'access denied',str(path))
+            return real_unlink(path)
+        with patch.object(deep_engine.os,'unlink',side_effect=flaky_unlink):
+            self.e.clean_flat(r,{'.smi'})
+        folder=Path(r['run'])/'expanded'/SOURCES[0]/'작품'
+        self.assertTrue((folder/'01.smi').exists())
+        self.assertFalse((folder/'locked.ttf').exists())
+        self.assertEqual(r['state'],'정리 완료')
+        self.assertEqual(calls['n'],1)
+
+    def test_flat_cleanup_can_resume_after_interrupted_delete(self):
+        import deep_engine
+        from unittest.mock import patch
+        self.put(self.a,'작품/pack.zip',zb([
+            ('01.smi',b'subtitle'),
+            ('a.ttf',b'font-a'),
+            ('b.ttf',b'font-b')
+        ]))
+        r=self.run_analysis()
+        real_unlink=deep_engine.os.unlink
+        def blocked_unlink(path):
+            if str(path).endswith('b.ttf'):
+                raise PermissionError(5,'access denied',str(path))
+            return real_unlink(path)
+        with patch.object(deep_engine.os,'unlink',side_effect=blocked_unlink):
+            with self.assertRaises(PermissionError):
+                self.e.clean_flat(r,{'.smi'})
+        self.assertEqual(r['state'],'정리 미완료')
+        self.assertEqual(r['selected_extensions'],['.smi'])
+
+        # Same action should resume from the saved deletion plan, not demand re-analysis.
+        self.e.clean_flat(r,{'.smi'})
+        folder=Path(r['run'])/'expanded'/SOURCES[0]/'작품'
+        self.assertTrue((folder/'01.smi').exists())
+        self.assertFalse((folder/'a.ttf').exists())
+        self.assertFalse((folder/'b.ttf').exists())
+        self.assertEqual(r['state'],'정리 완료')
+
+
 if __name__=='__main__':unittest.main()
