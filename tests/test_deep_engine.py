@@ -178,4 +178,37 @@ class DeepTests(unittest.TestCase):
         self.assertTrue(r['extensionless_scanned'])
         self.assertTrue((Path(r['run'])/'extensionless_detection.csv').exists())
 
+    def test_extensionless_signature_classification_and_zip_expansion(self):
+        hidden_zip=zb([('inside/03.smi',b'from-hidden-zip')])
+        self.put(self.a,'작품/pack.zip',zb([
+            ('archive_noext',hidden_zip),
+            ('seven_noext',b'7z\xbc\xaf\x27\x1c'+b'fake7z'),
+            ('egg_noext',b'EGGA'+b'fakeegg'),
+            ('alz_noext',b'ALZ\x01'+b'fakealz'),
+            ('jpg_noext',b'\xff\xd8\xff\xe0'+b'fakejpg'),
+            ('zero_noext',b'')
+        ]))
+        r=self.run_analysis()
+        self.e.detect_extensionless(r)
+        folder=Path(r['run'])/'expanded'/SOURCES[0]/'작품'
+        names=sorted(p.name for p in folder.iterdir() if p.is_file())
+
+        self.assertIn('archive_noext.zip',names)
+        self.assertIn('03.smi',names)
+        self.assertIn('seven_noext.7z',names)
+        self.assertIn('egg_noext.egg',names)
+        self.assertIn('alz_noext.alz',names)
+        self.assertIn('jpg_noext.jpg',names)
+        self.assertIn('zero_noext',names)
+
+        def detected(name):
+            return next(x for x in r['extensionless_detection']
+                        if x['old_path'].replace('\\','/').endswith('/'+name))
+        self.assertEqual(detected('archive_noext')['kind'],'archive')
+        self.assertIn('ZIP 재귀 해제',detected('archive_noext')['action'])
+        self.assertEqual(detected('seven_noext')['detected_extension'],'.7z')
+        self.assertEqual(detected('egg_noext')['detected_extension'],'.egg')
+        self.assertEqual(detected('alz_noext')['detected_extension'],'.alz')
+        self.assertEqual(detected('zero_noext')['kind'],'empty')
+
 if __name__=='__main__':unittest.main()

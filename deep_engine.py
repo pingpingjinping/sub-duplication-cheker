@@ -29,7 +29,7 @@ class Engine(BaseEngine):
             shutil.rmtree(fs_path(temp_root),ignore_errors=True)
 
     def work_folder(self, rel):
-        parts=Path(rel.replace('\\\\','/')).parts
+        parts=Path(rel.replace('\\','/')).parts
         # The selected source directory is the root; its immediate children are work folders.
         return parts[0] if len(parts)>1 else '_root'
 
@@ -98,89 +98,159 @@ class Engine(BaseEngine):
                 return self.store_leaf(run,top,path,rel,chain,work,'내부 검증 불가: '+str(e))
         return self.store_leaf(run,top,path,rel,chain,work)
     def detect_extensionless(self, run):
-        """Detect subtitle formats for extensionless flattened files and rename only confident matches."""
+        """Classify extensionless files by signature/content; expand verified ZIPs in-place."""
         if run.get('version')!=2:
             raise ValueError('작품 폴더별 해제 작업에서만 사용할 수 있습니다.')
         if run.get('state')!='분석 완료':
             raise ValueError('압축 해제·확장자 조사를 먼저 완료하세요.')
         root=Path(run['run'])
         targets=[r for r in run['records'] if not Path(r['name']).suffix]
-        self.log(f'무확장자 파일 내용 판별 시작: {len(targets):,}개')
+        self.log(f'무확장자 파일 형식 판별 시작: {len(targets):,}개')
 
         def decode_candidates(data):
             texts=[]
             for enc in ('utf-8-sig','utf-16','cp949','euc-kr','shift_jis'):
-                try:
-                    t=data.decode(enc)
-                except (UnicodeDecodeError,LookupError):
-                    continue
+                try:t=data.decode(enc)
+                except (UnicodeDecodeError,LookupError):continue
                 if t not in texts:texts.append(t)
             return texts
 
-        def classify(data):
-            texts=decode_candidates(data)
-            for text in texts:
-                head=text[:200000]
-                low=head.casefold()
+        def binary_type(data):
+            # Archive/container signatures first.
+            if data.startswith(b'7z\xbc\xaf\x27\x1c'):return '.7z','archive','7z 시그니처'
+            if data.startswith(b'Rar!\x1a\x07\x00') or data.startswith(b'Rar!\x1a\x07\x01\x00'):return '.rar','archive','RAR 시그니처'
+            if data.startswith(b'EGGA'):return '.egg','archive','EGG 시그니처'
+            if data.startswith(b'ALZ\x01'):return '.alz','archive','ALZ 시그니처'
+            if data.startswith(b'\x1f\x8b'):return '.gz','archive','GZIP 시그니처'
+            if data.startswith(b'BZh'):return '.bz2','archive','BZIP2 시그니처'
+            if data.startswith(b'\xfd7zXZ\x00'):return '.xz','archive','XZ 시그니처'
+            if len(data)>=262 and data[257:262]==b'ustar':return '.tar','archive','TAR ustar 헤더'
+
+            # Common non-subtitle binary attachments.
+            if data.startswith(b'\x89PNG\r\n\x1a\n'):return '.png','binary','PNG 시그니처'
+            if data.startswith(b'\xff\xd8\xff'):return '.jpg','binary','JPEG 시그니처'
+            if data.startswith((b'GIF87a',b'GIF89a')):return '.gif','binary','GIF 시그니처'
+            if data.startswith(b'%PDF-'):return '.pdf','binary','PDF 시그니처'
+            if data.startswith(b'OTTO'):return '.otf','binary','OpenType 폰트 시그니처'
+            if data.startswith((b'\x00\x01\x00\x00',b'true')):return '.ttf','binary','TrueType 폰트 시그니처'
+            if data.startswith(b'wOFF'):return '.woff','binary','WOFF 폰트 시그니처'
+            if data.startswith(b'wOF2'):return '.woff2','binary','WOFF2 폰트 시그니처'
+            return '','',''
+
+        def text_type(data):
+            for text in decode_candidates(data):
+                head=text[:200000];low=head.casefold()
                 stripped=head.lstrip('\ufeff\x00 \t\r\n')
-                if stripped.upper().startswith('WEBVTT'):
-                    return '.vtt','WEBVTT 헤더'
+                if stripped.upper().startswith('WEBVTT'):return '.vtt','subtitle','WEBVTT 헤더'
                 if re.search(r'<\s*sami\b',low) or re.search(r'<\s*sync\b[^>]*\bstart\s*=',low):
-                    return '.smi','SAMI/SYNC 태그'
+                    return '.smi','subtitle','SAMI/SYNC 태그'
                 if '[script info]' in low and '[events]' in low:
                     if '[v4 styles]' in low and '[v4+ styles]' not in low:
-                        return '.ssa','SSA Script Info/Events'
-                    return '.ass','ASS Script Info/Events'
+                        return '.ssa','subtitle','SSA Script Info/Events'
+                    return '.ass','subtitle','ASS Script Info/Events'
                 if re.search(r'(?m)^\s*\d+\s*\r?\n\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}',head):
-                    return '.srt','SRT 번호+타임코드'
+                    return '.srt','subtitle','SRT 번호+타임코드'
                 if len(re.findall(r'(?m)^\{\d+\}\{\d+\}',head))>=2:
-                    return '.sub','MicroDVD 프레임 자막'
+                    return '.sub','subtitle','MicroDVD 프레임 자막'
                 if low.lstrip().startswith('# vobsub index file') or ('timestamp:' in low and 'filepos:' in low):
-                    return '.idx','VobSub 인덱스'
-            return '','판별 불가'
+                    return '.idx','subtitle','VobSub 인덱스'
+                if re.search(r'<\s*!doctype\s+html\b|<\s*html\b',low):
+                    return '.html','web','HTML 문서'
+                if re.match(r'(?is)^\s*https?://',head):
+                    return '','web','URL/웹 응답 텍스트'
+            return '','','판별 불가'
 
-        rows=[]
-        renamed=0;unknown=0;missing=0
-        for i,r in enumerate(targets,1):
-            self.check();old=root/r['work']
-            if not os.path.exists(fs_path(old)):
-                missing+=1
-                rows.append([r['source'],r.get('work_folder',''),r['work'],'','','파일 없음'])
-                continue
-            if sha(old)!=r['sha']:
-                raise ValueError('해제 파일 변경됨: '+str(old))
-            with open(fs_path(old),'rb') as fh:
-                data=fh.read(min(file_size(old),2*1024*1024))
-            ext,reason=classify(data)
-            if not ext:
-                unknown+=1
-                r['detected_extension']=''
-                r['extension_detection']=reason
-                rows.append([r['source'],r.get('work_folder',''),r['work'],'',r['work'],reason])
-                continue
-
+        def collision_name(old,ext):
             new=old.with_name(old.name+ext);k=2
             while os.path.exists(fs_path(new)):
                 new=old.with_name(old.name+f'__{k}'+ext);k+=1
-            os.replace(fs_path(old),fs_path(new))
-            r['name']=new.name
-            r['work']=str(new.relative_to(root))
-            r['detected_extension']=ext
-            r['extension_detection']=reason
-            renamed+=1
-            rows.append([r['source'],r.get('work_folder',''),str(old.relative_to(root)),ext,r['work'],reason])
-            if i%100==0:self.log(f'무확장자 판별: {i:,}/{len(targets):,}')
+            return new
 
+        rows=[];renamed=0;unknown=0;missing=0;zip_expanded=0;zip_failed=0
+        kind_counts=collections.Counter()
+        counter=[0];temp_root=root/'_extensionless_zip_tmp';ensure_dir(temp_root)
+        try:
+            for i,r in enumerate(targets,1):
+                self.check();old=root/r['work'];old_work=r['work'];old_display=str(old_work).replace('\\\\','/')
+                if not os.path.exists(fs_path(old)):
+                    missing+=1
+                    rows.append([r['source'],r.get('work_folder',''),old_display,'missing','','',old_display,'파일 없음'])
+                    continue
+                if sha(old)!=r['sha']:raise ValueError('해제 파일 변경됨: '+str(old))
+                size=file_size(old)
+                if size==0:
+                    ext='';kind='empty';reason='0바이트'
+                else:
+                    # zipfile.is_zipfile validates ZIP structure even when the filename has no extension.
+                    if zipfile.is_zipfile(fs_path(old)):
+                        ext='.zip';kind='archive';reason='유효한 ZIP 구조'
+                    else:
+                        with open(fs_path(old),'rb') as fh:data=fh.read(min(size,2*1024*1024))
+                        ext,kind,reason=binary_type(data)
+                        if not kind:ext,kind,reason=text_type(data)
+                kind=kind or 'unknown';kind_counts[kind]+=1
+
+                if not ext:
+                    unknown+=1
+                    r['detected_extension']='';r['detected_kind']=kind;r['extension_detection']=reason
+                    rows.append([r['source'],r.get('work_folder',''),old_display,kind,'','',old_display,reason])
+                    continue
+
+                new=collision_name(old,ext)
+                os.replace(fs_path(old),fs_path(new))
+                r['name']=new.name;r['work']=str(new.relative_to(root))
+                r['detected_extension']=ext;r['detected_kind']=kind;r['extension_detection']=reason
+                renamed+=1
+                action='확장자 부여'
+
+                # Verified ZIPs are the only newly detected archive type we can safely recurse
+                # with the built-in extractor. Other archive formats are labeled and preserved.
+                if ext=='.zip':
+                    before=len(run['records'])
+                    try:
+                        with zipfile.ZipFile(fs_path(new)) as z:
+                            infos=[x for x in z.infolist() if not x.is_dir()]
+                            if not infos:
+                                raise ValueError('빈 ZIP')
+                            if any(x.flag_bits&1 for x in infos):
+                                raise ValueError('암호화 ZIP')
+                        tree=self.expand(run,r,new,r['rel'],[],counter,[0],0,r.get('work_folder','_root'),temp_root)
+                        added=len(run['records'])-before
+                        if tree.get('kind')=='zip' and added>0:
+                            zip_expanded+=1;action=f'ZIP 재귀 해제 + {added:,}개 추가'
+                            r['archive_extracted']=True
+                        else:
+                            raise ValueError('해제 가능한 내부 파일 없음')
+                    except Cancelled:raise
+                    except Exception as e:
+                        # Keep only the renamed original archive; do not duplicate it on failure.
+                        del run['records'][before:]
+                        zip_failed+=1;action='ZIP 보존(해제 불가)'
+                        r['archive_extracted']=False
+                        r['extension_detection']=reason+' / 해제 보류: '+str(e)
+
+                rows.append([r['source'],r.get('work_folder',''),old_display,kind,ext,action,str(r['work']).replace('\\\\','/'),r['extension_detection']])
+                if i%100==0:self.log(f'무확장자 판별: {i:,}/{len(targets):,}')
+        finally:
+            shutil.rmtree(fs_path(temp_root),ignore_errors=True)
+
+        # Recalculate duplicate candidates after newly extracted ZIP leaves are added.
+        for r in run['records']:
+            r['delete']=False;r['actual']=False;r['group']='';r['representative']='';r['reason']=''
+        self.plan(run)
         run['extensionless_scanned']=True
         run['extensionless_detection']=[
-            {'source':x[0],'work_folder':x[1],'old_path':x[2],'detected_extension':x[3],
-             'new_path':x[4],'reason':x[5]} for x in rows
+            {'source':x[0],'work_folder':x[1],'old_path':x[2],'kind':x[3],
+             'detected_extension':x[4],'action':x[5],'new_path':x[6],'reason':x[7]} for x in rows
         ]
         out=root/'extensionless_detection.csv'
         with open(fs_path(out),'w',encoding='utf-8-sig',newline='') as fh:
-            w=csv.writer(fh);w.writerow(['소스','작품 폴더','원래 작업 경로','판별 확장자','현재 작업 경로','판별 근거']);w.writerows(rows)
+            w=csv.writer(fh)
+            w.writerow(['소스','작품 폴더','원래 작업 경로','판별 종류','판별 확장자','처리','현재 작업 경로','판별 근거'])
+            w.writerows(rows)
         self.save(run);report(run)
-        self.log(f'무확장자 판별 완료: 확장자 부여 {renamed:,}개 / 판별 불가 {unknown:,}개 / 파일 없음 {missing:,}개')
+        counts=', '.join(f'{k} {v:,}' for k,v in sorted(kind_counts.items()))
+        self.log(f'무확장자 판별 완료: {counts} / ZIP 자동 해제 {zip_expanded:,}개 / ZIP 보존 {zip_failed:,}개 / 판별 불가·무확장 {unknown:,}개')
         return run
 
     def clean_flat(self, run, extensions):
