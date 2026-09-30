@@ -1,5 +1,5 @@
 """Leaf-level deduplication and reconstruction of arbitrarily nested subtitle ZIPs."""
-import collections, hashlib, json, shutil, stat, tempfile, zipfile
+import collections, hashlib, json, os, shutil, stat, tempfile, zipfile
 from pathlib import Path
 from engine import Engine as BaseEngine, SOURCES, Cancelled, sha, safe_member, metadata, report, fs_path, file_size, ensure_dir, copy2_file
 
@@ -10,22 +10,62 @@ class Engine(BaseEngine):
         run = super().analyze(inputs, output, cross)
         root=Path(run['run']); (root/'cleaned').rename(root/'original_copy')
         run['top_records']=run['records'];run['records']=[];run['trees']=[]
-        run['version']=2;run['state']='내부 압축 해제 중';self.save(run)
+        run['version']=2;run['state']='작품 폴더별 압축 해제 중';self.save(run)
         counter=[0]
+        temp_root=root/'_expand_tmp'
+        ensure_dir(temp_root)
         try:
             for top in run['top_records']:
                 self.check();p=root/'original_copy'/top['source']/top['rel']
-                self.log('내부 압축 해제: '+top['source']+'/'+top['rel'])
-                tree=self.expand(run,top,p,top['rel'],[],counter,[0],0)
+                work=self.work_folder(top['rel'])
+                self.log(f'압축 해제: {top["source"]}/{work} ← {top["rel"]}')
+                tree=self.expand(run,top,p,top['rel'],[],counter,[0],0,work,temp_root)
                 tree['top_source']=top['source'];tree['top_rel']=top['rel'];run['trees'].append(tree)
             self.plan(run);run['state']='분석 완료';self.save(run);report(run)
             return run
         except Exception:
             run['state']='분석 미완료';self.save(run);raise
+        finally:
+            shutil.rmtree(fs_path(temp_root),ignore_errors=True)
 
-    def expand(self,run,top,path,rel,chain,counter,total,depth):
-        self.check();root=Path(run['run'])
-        start=len(run['records'])
+    def work_folder(self, rel):
+        parts=Path(rel.replace('\\\\','/')).parts
+        # The selected source directory is the root; its immediate children are work folders.
+        return parts[0] if len(parts)>1 else '_root'
+
+    def leaf_destination(self, root, source, work, name):
+        folder=root/'expanded'/source/work
+        ensure_dir(folder)
+        base=folder/Path(name).name
+        dest=base;k=2
+        while os.path.exists(fs_path(dest)):
+            dest=base.with_name(base.stem+f'__{k}'+base.suffix);k+=1
+        return dest
+
+    def store_leaf(self, run, top, path, rel, chain, work, error=''):
+        root=Path(run['run'])
+        name=Path(rel.split('!/')[-1]).name
+        dest=self.leaf_destination(root,top['source'],work,name)
+        copy2_file(path,dest)
+        title,ep,uploader,season=metadata(top['rel'])
+        if not ep:
+            import re
+            m=re.search(r'(\\d+)\\s*(?:화|회)|(?:ep|episode)[ ._-]*(\\d+)',rel,re.I)
+            ep=m.group(0) if m else ''
+        origin=dict(top['origin'])
+        if chain:
+            original=top['origin'].get('file') or top['origin']['archive']+'!/'+top['origin']['member']
+            origin={'archive':original,'member':rel.split('!/',1)[1],'chain':chain}
+        r={'source':top['source'],'rel':rel,'name':name,'size':file_size(dest),'sha':sha(dest),
+           'title':title,'episode':ep,'uploader':uploader,'season':season,'origin':origin,
+           'signature':'','inner_names':[],'error':error,'delete':False,'group':'',
+           'representative':'','reason':'','actual':False,'work':str(dest.relative_to(root)),
+           'work_folder':work}
+        rid=len(run['records']);run['records'].append(r)
+        return {'kind':'leaf','record':rid}
+
+    def expand(self,run,top,path,rel,chain,counter,total,depth,work,temp_root):
+        self.check();start=len(run['records'])
         if path.suffix.lower()=='.zip':
             try:
                 if depth>8:raise ValueError('내부 ZIP 깊이 제한 초과')
@@ -38,39 +78,25 @@ class Engine(BaseEngine):
                         if item.flag_bits&1:raise ValueError('암호화 ZIP')
                         total[0]+=item.file_size
                         if total[0]>2*1024**3:raise ValueError('내부 ZIP 누적 해제 한도 2GiB 초과')
-                        counter[0]+=1;dest=root/'expanded'/f'{counter[0]:09d}'/Path(item.filename).name
-                        ensure_dir(dest.parent)
-                        with z.open(item) as src,open(fs_path(dest),'wb') as dst:
+                        counter[0]+=1
+                        temp=temp_root/f'{counter[0]:09d}'/Path(item.filename).name
+                        ensure_dir(temp.parent)
+                        with z.open(item) as src,open(fs_path(temp),'wb') as dst:
                             while True:
                                 self.check();b=src.read(1024*1024)
                                 if not b:break
                                 dst.write(b)
-                        child=self.expand(run,top,dest,rel+'!/'+item.filename,chain+[index],counter,total,depth+1)
+                        child=self.expand(run,top,temp,rel+'!/'+item.filename,chain+[index],counter,total,depth+1,work,temp_root)
                         child['member']=item.filename;children.append(child)
                     if children:
-                        return {'kind':'zip','original':str(path.relative_to(root)),'children':children,'comment':z.comment.hex()}
-                error='빈 ZIP: 보존'
+                        return {'kind':'zip','original':str(path),'children':children,'comment':z.comment.hex()}
+                return self.store_leaf(run,top,path,rel,chain,work,'빈 ZIP: 보존')
             except Cancelled:raise
             except Exception as e:
-                # Entire failed subtree becomes one opaque preserved archive; never prune partial reads.
-                del run['records'][start:];error='내부 검증 불가: '+str(e)
-        else:error=''
-        title,ep,uploader,season=metadata(top['rel'])
-        if not ep:
-            import re
-            m=re.search(r'(\d+)\s*(?:화|회)|(?:ep|episode)[ ._-]*(\d+)',rel, re.I)
-            ep=m.group(0) if m else ''
-        origin=dict(top['origin'])
-        if chain:
-            original=top['origin'].get('file') or top['origin']['archive']+'!/'+top['origin']['member']
-            origin={'archive':original, 'member':rel.split('!/',1)[1], 'chain':chain}
-        r={'source':top['source'],'rel':rel,'name':Path(rel.split('!/')[-1]).name,
-           'size':file_size(path),'sha':sha(path),'title':title,'episode':ep,'uploader':uploader,
-           'season':season,'origin':origin,'signature':'','inner_names':[],'error':error,'delete':False,
-           'group':'','representative':'','reason':'','actual':False,'work':str(path.relative_to(root))}
-        rid=len(run['records']);run['records'].append(r)
-        return {'kind':'leaf','record':rid}
-
+                # Failed archives stay as opaque files inside the same work folder.
+                del run['records'][start:]
+                return self.store_leaf(run,top,path,rel,chain,work,'내부 검증 불가: '+str(e))
+        return self.store_leaf(run,top,path,rel,chain,work)
     def materialize(self,run,node,destination):
         """False means no surviving leaf; empty original ZIPs are opaque kept leaves."""
         self.check();root=Path(run['run'])
