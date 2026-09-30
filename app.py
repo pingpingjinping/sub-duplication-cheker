@@ -192,8 +192,23 @@ class App(tk.Tk):
         self.worker(lambda e:e.cross_source_cleanup(inputs,output))
 
     def choose_extensions_and_clean(self):
-        if not self.run_data or self.run_data.get('state')!='분석 완료':
+        if not self.run_data or self.run_data.get('state') not in ('분석 완료','정리 중','정리 미완료'):
             messagebox.showinfo('정리','먼저 전체 압축 해제·확장자 조사를 완료하거나 작업을 불러오세요.')
+            return
+        if self.run_data.get('state') in ('정리 중','정리 미완료'):
+            selected=list(self.run_data.get('selected_extensions',[]))
+            if not selected:
+                messagebox.showinfo('정리 재개','중단된 작업에 남길 확장자 기록이 없어 자동 재개할 수 없습니다.')
+                return
+            remaining=sum(bool(r.get('delete')) and not bool(r.get('actual')) for r in self.run_data.get('records',[]))
+            if messagebox.askyesno(
+                '중단된 정리 재개',
+                f'이 작업은 정리 도중 중단되었습니다.\\n\\n'
+                f'기존 선택 확장자: {", ".join(selected)}\\n'
+                f'manifest 기준 남은 삭제 대상: {remaining:,}개\\n\\n'
+                '이미 삭제된 파일은 자동으로 인식하고, 남은 지점부터 계속 진행합니다.'
+            ):
+                self.worker(lambda e:e.clean_flat(self.run_data,selected))
             return
         records=self.run_data.get('records',[])
         if any(not Path(r['name']).suffix for r in records) and not self.run_data.get('extensionless_scanned'):
