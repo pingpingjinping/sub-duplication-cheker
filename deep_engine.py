@@ -1,7 +1,7 @@
 """Leaf-level deduplication and reconstruction of arbitrarily nested subtitle ZIPs."""
 import collections, csv, hashlib, json, os, re, shutil, stat, subprocess, tempfile, zipfile
 from pathlib import Path
-from engine import Engine as BaseEngine, SOURCES, Cancelled, sha, safe_member, metadata, report, fs_path, file_size, ensure_dir, copy2_file
+from engine import Engine as BaseEngine, SOURCES, SUBS, Cancelled, sha, safe_member, metadata, report, fs_path, file_size, ensure_dir, copy2_file, repair_legacy_zip_name, episode_hint, canonical_work_name
 
 class Engine(BaseEngine):
     deep_mode = True
@@ -49,9 +49,7 @@ class Engine(BaseEngine):
         copy2_file(path,dest)
         title,ep,uploader,season=metadata(top['rel'])
         if not ep:
-            import re
-            m=re.search(r'(\\d+)\\s*(?:화|회)|(?:ep|episode)[ ._-]*(\\d+)',rel,re.I)
-            ep=m.group(0) if m else ''
+            ep=episode_hint(rel)
         origin=dict(top['origin'])
         if chain:
             original=top['origin'].get('file') or top['origin']['archive']+'!/'+top['origin']['member']
@@ -72,22 +70,22 @@ class Engine(BaseEngine):
                 children=[]
                 with zipfile.ZipFile(fs_path(path)) as z:
                     for index,item in enumerate(z.infolist()):
-                        self.check();safe_member(item.filename)
+                        self.check();member_name=repair_legacy_zip_name(item.filename,item.flag_bits);safe_member(member_name)
                         if item.is_dir():continue
                         if stat.S_ISLNK(item.external_attr>>16):raise ValueError('내부 ZIP 심볼릭 링크')
                         if item.flag_bits&1:raise ValueError('암호화 ZIP')
                         total[0]+=item.file_size
                         if total[0]>2*1024**3:raise ValueError('내부 ZIP 누적 해제 한도 2GiB 초과')
                         counter[0]+=1
-                        temp=temp_root/f'{counter[0]:09d}'/Path(item.filename).name
+                        temp=temp_root/f'{counter[0]:09d}'/Path(member_name).name
                         ensure_dir(temp.parent)
                         with z.open(item) as src,open(fs_path(temp),'wb') as dst:
                             while True:
                                 self.check();b=src.read(1024*1024)
                                 if not b:break
                                 dst.write(b)
-                        child=self.expand(run,top,temp,rel+'!/'+item.filename,chain+[index],counter,total,depth+1,work,temp_root)
-                        child['member']=item.filename;children.append(child)
+                        child=self.expand(run,top,temp,rel+'!/'+member_name,chain+[index],counter,total,depth+1,work,temp_root)
+                        child['member']=member_name;children.append(child)
                     if children:
                         return {'kind':'zip','original':str(path),'children':children,'comment':z.comment.hex()}
                 return self.store_leaf(run,top,path,rel,chain,work,'빈 ZIP: 보존')
@@ -305,10 +303,7 @@ class Engine(BaseEngine):
         name=Path(member).name
         dest=self.leaf_destination(root,parent['source'],work,name)
         copy2_file(source_file,dest)
-        ep=parent.get('episode','')
-        if not ep:
-            m=re.search(r'(\d+)\s*(?:화|회)|(?:ep|episode)[ ._-]*(\d+)',member,re.I)
-            ep=m.group(0) if m else ''
+        ep=parent.get('episode','') or episode_hint(member)
         rel=parent.get('rel',parent['name'])+'!/'+member.replace('\\','/')
         r={'source':parent['source'],'rel':rel,'name':dest.name,'size':file_size(dest),'sha':sha(dest),
            'title':parent.get('title',''),'episode':ep,'uploader':parent.get('uploader',''),
@@ -425,6 +420,171 @@ class Engine(BaseEngine):
         self.save(run);report(run)
         self.log(f'남은 압축파일 해제 완료: 성공 {success:,}개 / 실패 {failed:,}개 / 추가 파일 {added_total:,}개 / 폰트·깊이 제외 {skipped_nested:,}개')
         return run
+
+    def filename_repair_candidates(self, run):
+        """Return surviving flattened records whose mojibake name can be safely recovered as CP949."""
+        if run.get('version')!=2:return []
+        root=Path(run['run']);out=[]
+        for r in run.get('records',[]):
+            if r.get('actual'):continue
+            old=root/r.get('work','')
+            if not old.exists():continue
+            new_name=repair_legacy_zip_name(r.get('name',old.name),0)
+            if new_name!=r.get('name',old.name):
+                out.append((r,new_name))
+        return out
+
+    def repair_broken_filenames(self, run):
+        """Repair already-expanded CP949 ZIP member names without rescanning the original sources."""
+        if run.get('version')!=2:
+            raise ValueError('작품 폴더별 해제 작업에서만 사용할 수 있습니다.')
+        if run.get('state') not in ('분석 완료','정리 완료'):
+            raise ValueError('분석 완료 또는 평탄화 정리 완료 작업에서만 사용할 수 있습니다.')
+        root=Path(run['run']);targets=self.filename_repair_candidates(run)
+        rows=[];renamed=0
+        for r,new_name in targets:
+            self.check();old=root/r['work']
+            if sha(old)!=r['sha']:raise ValueError('해제 파일 변경됨: '+str(old))
+            dest=old.with_name(new_name);base=dest;k=2
+            while os.path.exists(fs_path(dest)) and os.path.normcase(str(dest))!=os.path.normcase(str(old)):
+                dest=base.with_name(base.stem+f'__{k}'+base.suffix);k+=1
+            os.replace(fs_path(old),fs_path(dest))
+            before=r['name'];r['name']=dest.name;r['work']=str(dest.relative_to(root))
+            if not r.get('episode'):r['episode']=episode_hint(dest.name)
+            r['filename_repaired_from']=before
+            rows.append([r['source'],r.get('work_folder',''),before,dest.name,r.get('episode',''),r['work']])
+            renamed+=1
+        run['filename_repairs']=[
+            {'source':x[0],'work_folder':x[1],'old_name':x[2],'new_name':x[3],'episode':x[4],'work':x[5]} for x in rows
+        ]
+        out=root/'filename_repair.csv'
+        with open(fs_path(out),'w',encoding='utf-8-sig',newline='') as fh:
+            w=csv.writer(fh);w.writerow(['소스','작품 폴더','깨진 파일명','복구 파일명','회차 보조값','현재 작업 경로']);w.writerows(rows)
+        self.save(run);report(run)
+        self.log(f'깨진 ZIP 파일명 복구 완료: {renamed:,}개')
+        return run
+
+    def cross_source_cleanup(self, inputs, output):
+        """Create a safe final copy and remove exact cross-source duplicates only for matched works."""
+        output=Path(output).resolve()
+        active={s:[Path(p).resolve() for p in inputs.get(s,[]) if str(p)] for s in SOURCES}
+        active={s:ps for s,ps in active.items() if ps}
+        if len(active)<2:raise ValueError('교차 중복 정리는 최소 2개 소스 폴더가 필요합니다.')
+        for source,paths in active.items():
+            for p in paths:
+                if not p.is_dir():raise ValueError(f'{source}: 폴더를 선택하세요: {p}')
+                if output==p or p in output.parents:raise ValueError('결과 폴더는 입력 폴더 밖에 지정하세요.')
+
+        from datetime import datetime
+        root=output/('CrossSourceCleanup_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+        ensure_dir(root)
+        run={'version':3,'run':str(root),'records':[],'archives':[],'cross':True,
+             'cleanup_mode':'cross_source_final','state':'교차 중복 분석 중','reviews':[],
+             'source_priority':list(SOURCES)}
+        self.save(run)
+        allowed=set(SUBS)|{'.jmk'}
+        try:
+            for source in SOURCES:
+                paths=active.get(source,[])
+                if not paths:continue
+                target=root/'cross_cleaned'/source;ensure_dir(target)
+                for selected in paths:
+                    base=(selected/source) if (selected/source).is_dir() else selected
+                    files=sorted(p for p in base.rglob('*') if p.is_file())
+                    self.log(f'{source}: 최종 정리본 {len(files):,}개 복사·SHA 계산')
+                    for i,p in enumerate(files,1):
+                        self.check()
+                        if p.is_symlink():raise ValueError('심볼릭 링크는 가져올 수 없습니다: '+str(p))
+                        rel=p.relative_to(base).as_posix();parts=Path(rel).parts
+                        work=parts[0] if len(parts)>1 else '_root'
+                        dest=target/rel;ensure_dir(dest.parent);copy2_file(p,dest)
+                        title=work if work!='_root' else ''
+                        ep=episode_hint(p.name)
+                        r={'source':source,'rel':rel,'name':p.name,'size':file_size(dest),'sha':sha(dest),
+                           'title':title,'episode':ep,'uploader':'','season':'','origin':{'file':str(p)},
+                           'signature':'','inner_names':[],'error':'','delete':False,'group':'',
+                           'representative':'','reason':'','actual':False,
+                           'work':str(dest.relative_to(root)),'work_folder':work,
+                           'work_key':canonical_work_name(work),'cross_eligible':p.suffix.lower() in allowed}
+                        run['records'].append(r)
+                        if i%1000==0:self.log(f'{source}: {i:,}/{len(files):,}개')
+                self.save(run)
+
+            # Exact SHA is mandatory; work folders must also match after conservative normalization.
+            groups=collections.defaultdict(list)
+            by_sha=collections.defaultdict(list)
+            for r in run['records']:
+                if not r['cross_eligible'] or not r['size']:continue
+                groups[(r['work_key'],r['sha'])].append(r);by_sha[r['sha']].append(r)
+
+            gid=0
+            for (work_key,digest),members in sorted(groups.items(),key=lambda x:str(x[0])):
+                sources={r['source'] for r in members}
+                if not work_key or len(sources)<2:continue
+                gid+=1;group=f'CROSS-{gid:06d}'
+                winner=sorted(members,key=lambda r:(SOURCES.index(r['source']),r['rel'].casefold()))[0]
+                rep=winner['source']+'/'+winner['rel']
+                for r in members:
+                    r['group']=group;r['representative']=rep
+                    if r is winner:r['reason']='교차 소스 동일 SHA 대표본 보존'
+                    else:r['delete']=True;r['reason']='매칭 작품의 교차 소스 SHA-256 동일'
+
+            # Same bytes across differently named works are surfaced, never auto-deleted.
+            reviews=[];seen=set()
+            for digest,members in by_sha.items():
+                if len({r['source'] for r in members})<2:continue
+                keys={r['work_key'] for r in members if r['work_key']}
+                if len(keys)<=1:continue
+                token=(digest,tuple(sorted(keys)))
+                if token in seen:continue
+                seen.add(token)
+                reviews.append({'sha':digest,'reason':'SHA 동일하지만 작품 폴더명이 달라 자동 삭제 안 함',
+                                'paths':[r['source']+'/'+r['rel'] for r in members],
+                                'works':[r.get('work_folder','') for r in members]})
+            run['cross_source_review']=reviews
+            run['state']='교차 정리 중';self.save(run)
+
+            # Verify the copy first, then delete only the planned duplicates from the safe copy.
+            for r in run['records']:
+                self.check();p=root/r['work']
+                if sha(p)!=r['sha']:raise ValueError('교차 정리 작업본 변경됨: '+str(p))
+            journal=root/'cross_deletion_journal.jsonl'
+            for i,r in enumerate(run['records'],1):
+                self.check()
+                if not r['delete']:continue
+                p=root/r['work']
+                with open(fs_path(journal),'a',encoding='utf-8') as j:
+                    j.write(json.dumps({'path':r['work'],'reason':r['reason'],'representative':r['representative']},ensure_ascii=False)+'\n')
+                    j.flush();os.fsync(j.fileno())
+                os.unlink(fs_path(p));r['actual']=True
+                if i%250==0:self.save(run)
+
+            # Verify surviving copy and original inputs.
+            for r in run['records']:
+                self.check();p=root/r['work']
+                if r['actual']:
+                    if p.exists():raise ValueError('교차 중복 삭제 검증 실패: '+str(p))
+                elif sha(p)!=r['sha']:raise ValueError('교차 중복 보존 파일 SHA 불일치: '+str(p))
+                if sha(r['origin']['file'])!=r['sha']:raise ValueError('입력 원본 변경됨: '+r['origin']['file'])
+
+            rows=[]
+            for r in run['records']:
+                if r['group']:
+                    rows.append([r['group'],r['source'],r['work_folder'],r['name'],r['sha'],
+                                 '삭제' if r['actual'] else '대표본 보존',r['representative']])
+            with open(fs_path(root/'cross_source_cleanup.csv'),'w',encoding='utf-8-sig',newline='') as fh:
+                w=csv.writer(fh);w.writerow(['그룹','소스','작품 폴더','파일명','SHA-256','처리','대표본']);w.writerows(rows)
+            with open(fs_path(root/'cross_source_review.csv'),'w',encoding='utf-8-sig',newline='') as fh:
+                w=csv.writer(fh);w.writerow(['SHA-256','사유','작품 폴더','경로'])
+                for q in reviews:w.writerow([q['sha'],q['reason'],' | '.join(q['works']),' | '.join(q['paths'])])
+            run['state']='교차 정리 완료';self.save(run);report(run)
+            self.log(f'세 소스 교차 중복 정리 완료: 삭제 {sum(r["actual"] for r in run["records"]):,}개 / 검토 {len(reviews):,}그룹')
+            return run
+        except Exception:
+            run['state']='교차 정리 미완료';self.save(run)
+            try:report(run)
+            except Exception:pass
+            raise
 
     def clean_flat(self, run, extensions):
         """Filter the flattened expanded tree and remove exact duplicates per work folder."""
@@ -613,6 +773,8 @@ class Engine(BaseEngine):
             run['state']='정리 미완료';self.save(run);report(run);raise
 
     def restore(self,run):
+        if run.get('version')==3:
+            raise ValueError('교차 정리본은 입력 원본을 수정하지 않았습니다. 복원이 필요하지 않습니다.')
         if run.get('version')!=2:return super().restore(run)
         root=Path(run['run']);destination=root/'restored'
         if destination.exists():raise ValueError('restored 폴더가 이미 있습니다. 기존 복원본을 확인하세요.')
