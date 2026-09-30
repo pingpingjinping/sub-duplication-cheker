@@ -122,4 +122,40 @@ class DeepTests(unittest.TestCase):
         self.assertEqual({x.get('work_folder') for x in r['records'] if x['source']==SOURCES[0]},
                          {'작품A','작품B'})
 
+    def test_flat_cleanup_filters_extensions_and_dedupes_only_inside_each_work(self):
+        same=b'same subtitle'
+        self.put(self.a,'작품A/pack1.zip',zb([
+            ('01.smi',same),
+            ('font.ttf',b'font'),
+            ('02.smi',b'version-a')
+        ]))
+        self.put(self.a,'작품A/pack2.zip',zb([
+            ('renamed.srt',same),
+            ('02.smi',b'version-b')
+        ]))
+        self.put(self.a,'작품B/pack.zip',zb([
+            ('01.smi',same),
+            ('note.txt',b'note')
+        ]))
+        r=self.run_analysis()
+        self.e.clean_flat(r,{'.smi','.srt'})
+
+        expanded=Path(r['run'])/'expanded'/SOURCES[0]
+        a=expanded/'작품A';b=expanded/'작품B'
+        afiles=sorted(p.name for p in a.iterdir() if p.is_file())
+        bfiles=sorted(p.name for p in b.iterdir() if p.is_file())
+
+        # Same SHA in 작품A is one survivor; same bytes in 작품B stay because works are isolated.
+        self.assertEqual(len([p for p in a.iterdir() if p.is_file() and p.read_bytes()==same]),1)
+        self.assertEqual(len([p for p in b.iterdir() if p.is_file() and p.read_bytes()==same]),1)
+        # Same filename but different contents both survive after collision-safe extraction naming.
+        self.assertIn('02.smi',afiles)
+        self.assertIn('02__2.smi',afiles)
+        # Non-whitelisted attachments are removed and no ZIP is regenerated.
+        self.assertFalse(any(p.suffix.lower() in {'.ttf','.txt','.zip'} for p in expanded.rglob('*') if p.is_file()))
+        self.assertFalse(any(Path(r['run']).glob('*_cleaned.zip')))
+        self.assertEqual(r['state'],'정리 완료')
+        self.assertEqual(r['selected_extensions'],['.smi','.srt'])
+        self.assertTrue((self.a/'작품A/pack1.zip').exists())
+
 if __name__=='__main__':unittest.main()

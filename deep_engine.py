@@ -97,6 +97,92 @@ class Engine(BaseEngine):
                 del run['records'][start:]
                 return self.store_leaf(run,top,path,rel,chain,work,'내부 검증 불가: '+str(e))
         return self.store_leaf(run,top,path,rel,chain,work)
+    def clean_flat(self, run, extensions):
+        """Filter the flattened expanded tree and remove exact duplicates per work folder."""
+        if run.get('version')!=2:
+            raise ValueError('작품 폴더별 해제 작업에서만 사용할 수 있습니다.')
+        if run.get('state')!='분석 완료':
+            raise ValueError('압축 해제·확장자 조사를 먼저 완료하세요.')
+        selected={str(x).lower() for x in extensions}
+        if not selected:
+            raise ValueError('남길 확장자를 하나 이상 선택하세요.')
+        root=Path(run['run'])
+        self.log('선택 확장자 적용·작품 폴더별 SHA 중복 계산')
+
+        # The earlier survey plan may contain global duplicate candidates.
+        # Final cleanup intentionally recalculates only within each immediate work folder.
+        for r in run['records']:
+            r['delete']=False;r['actual']=False;r['group']='';r['representative']='';r['reason']=''
+
+        keep_candidates=[]
+        for r in run['records']:
+            ext=Path(r['name']).suffix.lower() or '(없음)'
+            if ext not in selected:
+                r['delete']=True
+                r['reason']='선택되지 않은 확장자 제거'
+            else:
+                keep_candidates.append(r)
+
+        groups=collections.defaultdict(list)
+        for r in keep_candidates:
+            groups[(r['source'],r.get('work_folder','_root'),r['sha'])].append(r)
+
+        duplicate_groups=0
+        for (_,_,_), members in sorted(groups.items(), key=lambda x: str(x[0])):
+            if len(members)<2:continue
+            duplicate_groups+=1;gid=f'FOLDER-DUP-{duplicate_groups:06d}'
+            winner=sorted(members,key=lambda r:r['work'])[0]
+            representative=winner['work']
+            for r in members:
+                r['group']=gid;r['representative']=representative
+                if r is winner:
+                    r['reason']='작품 폴더 내 동일 SHA 대표본 보존'
+                else:
+                    r['delete']=True;r['reason']='같은 작품 폴더 내 SHA-256 동일'
+
+        # Verify the flattened survey copy before deleting anything.
+        for r in run['records']:
+            self.check();p=root/r['work']
+            if not os.path.exists(fs_path(p)):
+                raise ValueError('해제 파일이 없습니다: '+str(p))
+            if sha(p)!=r['sha']:
+                raise ValueError('해제 파일 변경됨: '+str(p))
+
+        run['selected_extensions']=sorted(selected)
+        run['cleanup_mode']='flat_whitelist'
+        run['state']='정리 중';self.save(run)
+        journal=root/'deletion_journal.jsonl'
+        try:
+            for i,r in enumerate(run['records']):
+                self.check()
+                if not r['delete']:continue
+                p=root/r['work']
+                with open(fs_path(journal),'a',encoding='utf-8') as j:
+                    j.write(json.dumps({'path':r['work'],'reason':r['reason']},ensure_ascii=False)+'\\n')
+                    j.flush();os.fsync(j.fileno())
+                os.unlink(fs_path(p));r['actual']=True
+                if (i+1)%100==0:self.save(run)
+
+            # Empty work folders may remain. Avoid a second recursive filesystem walk here:
+            # very long Windows paths are already represented safely by the manifest.
+
+            for r in run['records']:
+                self.check();p=root/r['work']
+                exists=os.path.exists(fs_path(p))
+                if r['actual']:
+                    if exists:raise ValueError('삭제 대상이 남아 있습니다: '+str(p))
+                else:
+                    if not exists or sha(p)!=r['sha']:
+                        raise ValueError('보존 파일 검증 실패: '+str(p))
+
+            run['state']='정리 완료';self.save(run);report(run)
+            kept=sum(not r['actual'] for r in run['records'])
+            removed=sum(r['actual'] for r in run['records'])
+            self.log(f'정리 완료: 보존 {kept:,}개 / 제거 {removed:,}개 / ZIP 재생성 없음')
+            return run
+        except Exception:
+            run['state']='정리 미완료';self.save(run);report(run);raise
+
     def materialize(self,run,node,destination):
         """False means no surviving leaf; empty original ZIPs are opaque kept leaves."""
         self.check();root=Path(run['run'])

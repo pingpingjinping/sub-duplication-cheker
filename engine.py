@@ -357,23 +357,30 @@ def report(run):
     for source in SOURCES:
         rs=[r for r in records if r['source']==source]; keep=[r for r in rs if not r['actual']]
         summary += [[source+' 원본 파일 수',len(rs)],[source+' 원본 용량(Bytes)',sum(r['size'] for r in rs)], [source+' 현재 파일 수',len(keep)],[source+' 현재 용량(Bytes)',sum(r['size'] for r in keep)]]
-    summary += [['확정 중복 그룹 수',len(groups)],['확정 중복 삭제 후보',sum(r['delete'] for r in records)],['실제 삭제 파일 수',sum(r['actual'] for r in records)],['총 절약 용량(Bytes)',sum(r['size'] for r in records if r['actual'])],['검토 필요 수',len(run.get('reviews',[]))],['교차 중복 그룹 수',sum(len({r['source'] for r in rs})>1 for rs in groups.values())],['오배치 자동 삭제','하지 않음: 제목만으로 타 작품을 단정하지 않음'],['원본 보존','입력 폴더·ZIP을 수정하지 않음'],['ZIP 비교 기준','모든 내부 파일의 SHA-256·크기·중복 개수 비교. 파일명은 무시. 부가 파일도 포함.']]
+    summary += [['확정 중복 그룹 수',len(groups)],['정리 대상 파일 수' if run.get('cleanup_mode')=='flat_whitelist' else '확정 중복 삭제 후보',sum(r['delete'] for r in records)],['실제 삭제 파일 수',sum(r['actual'] for r in records)],['총 절약 용량(Bytes)',sum(r['size'] for r in records if r['actual'])],['검토 필요 수',len(run.get('reviews',[]))],['교차 중복 그룹 수',sum(len({r['source'] for r in rs})>1 for rs in groups.values())],['오배치 자동 삭제','하지 않음: 제목만으로 타 작품을 단정하지 않음'],['원본 보존','입력 폴더·ZIP을 수정하지 않음'],['ZIP 비교 기준','모든 내부 파일의 SHA-256·크기·중복 개수 비교. 파일명은 무시. 부가 파일도 포함.']]
     if run.get('version')==2:
         summary[-1]=['ZIP 비교 기준','내부 ZIP 재귀 해제 후 개별 파일 SHA-256 비교. 부분 중복도 제거. 싱크·문자·인코딩 차이는 보존.']
         summary += [['파일 수·용량 기준','개별 해제 파일 기준. 검증 불가 ZIP은 보존된 ZIP 자체 크기로 계산.'],['절약 용량 기준','최종 결과에서 제거된 개별 파일의 비압축 바이트. 원본·복구용 복사본 보존으로 디스크 사용량 감소를 뜻하지 않음.']]
         for source in SOURCES:
             orig=[r for r in run.get('top_records',[]) if r['source']==source]
-            folder=Path(run['run'])/'cleaned'/source
+            if run.get('cleanup_mode')=='flat_whitelist':
+                final=[r for r in records if r['source']==source and not r['actual']]
+                result_count=len(final);result_size=sum(r['size'] for r in final)
+            else:
+                folder=Path(run['run'])/'cleaned'/source
+                result_count=sum(p.is_file() for p in folder.rglob('*')) if folder.exists() else 0
+                result_size=sum(p.stat().st_size for p in folder.rglob('*') if p.is_file()) if folder.exists() else 0
             summary += [[source+' 원래 상위 파일 수',len(orig)],[source+' 원래 상위 용량(Bytes)',sum(r['size'] for r in orig)],
-                        [source+' 결과 상위 파일 수',sum(p.is_file() for p in folder.rglob('*')) if folder.exists() else 0],
-                        [source+' 결과 실제 용량(Bytes)',sum(p.stat().st_size for p in folder.rglob('*') if p.is_file()) if folder.exists() else 0]]
+                        [source+' 결과 상위 파일 수',result_count],
+                        [source+' 결과 실제 용량(Bytes)',result_size]]
     deleted=[['소스','원래 전체 경로','작업 경로','파일명','크기(Bytes)','크기(MiB)','SHA-256','분류','삭제 사유','보존된 대표 파일 경로','중복 그룹 ID','실제 삭제 여부']]
     kept=[['소스','최종 경로','파일명','크기(Bytes)','SHA-256','작품명','회차','업로더/번역자/릴','보존 사유','중복 그룹 ID']]
     misplaced=[['소스','현재 작품','현재 회차','원래 경로','파일명','추정 작품','판단 근거','처리 결과']]
     for r in records:
         if r['delete']:
             origin=r['origin']; original=origin.get('file') or origin['archive']+'!/'+origin['member']
-            deleted.append([r['source'],original,full(r),r['name'],r['size'],round(r['size']/1024**2,3),r['sha'],'반복 공용 첨부' if common(r['name']) else '확정 중복',r['reason'],r['representative'],r['group'],'삭제' if r['actual'] else '미삭제'])
+            kind='비선택 확장자' if r['reason']=='선택되지 않은 확장자 제거' else ('반복 공용 첨부' if common(r['name']) else '확정 중복')
+            deleted.append([r['source'],original,full(r),r['name'],r['size'],round(r['size']/1024**2,3),r['sha'],kind,r['reason'],r['representative'],r['group'],'삭제' if r['actual'] else '미삭제'])
         if not r['actual']: kept.append([r['source'],full(r),r['name'],r['size'],r['sha'],r['title'],r['episode'],r['uploader'],r['reason'] or ('검증 불가: 보존' if r['error'] else '고유 파일 또는 내용 차이: 보존'),r['group']])
         if r['title'] and r.get('inner_names') and len(normal(r['title']))>=3 and normal(r['title']) not in normal(' '.join(r['inner_names'])+' '+r['name']) and not common(r['name']):
             misplaced.append([r['source'],r['title'],r['episode'],full(r),r['name'],'자동 추정 안 함','현재 작품명이 내부 자막명에 없음. 별칭·영문명 가능','확정 중복으로 삭제' if r['actual'] else '검토 필요: 보존'])
@@ -406,6 +413,8 @@ def report(run):
         w.writerows(extension_rows)
     # Long path groups are row-based so no group list is silently truncated in a cell.
     sheets=[('요약',summary),('확장자조사',extension_rows),('삭제내역',deleted),('보존파일',kept),('검토필요',reviews),('오배치',misplaced),('공용첨부',shared),('교차비교',cross)]
-    if run.get('version')==2:
+    if run.get('version')==2 and run.get('cleanup_mode')!='flat_whitelist':
         sheets.append(('ZIP재구성',[['원래 ZIP 경로','처리 결과']]+[[x['path'],x['result']] for x in run.get('containers',[])]))
+    elif run.get('cleanup_mode')=='flat_whitelist':
+        sheets.append(('정리설정',[['항목','값'],['정리 방식','작품 폴더 평탄화 + 선택 확장자 + 폴더 내 SHA 중복 제거'],['선택 확장자',', '.join(run.get('selected_extensions',[]))],['최종 위치','expanded/소스/작품명/'],['ZIP 재생성','하지 않음']]))
     tmp=Path(run['run'])/'subtitle_cleanup_report.tmp.xlsx'; xlsx(tmp,sheets);tmp.replace(Path(run['run'])/'subtitle_cleanup_report.xlsx')
