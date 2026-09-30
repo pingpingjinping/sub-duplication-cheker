@@ -15,7 +15,7 @@ class App(tk.Tk):
         style.configure('Header.TLabel',font=('Malgun Gothic',17,'bold'))
         panel=ttk.Frame(self,padding=16); panel.pack(fill='both',expand=True)
         ttk.Label(panel,text='자막 중복 정리',style='Header.TLabel').pack(anchor='w')
-        ttk.Label(panel,text='1단계에서는 내부 ZIP까지 전부 해제하고 모든 파일 확장자를 조사합니다. 자동 삭제는 하지 않으며 원본은 보존합니다.').pack(anchor='w',pady=(4,12))
+        ttk.Label(panel,text='선택한 소스 폴더 바로 아래의 작품 폴더별로 ZIP을 전부 해제하고 확장자를 조사합니다. 자동 삭제는 하지 않으며 원본은 보존합니다.').pack(anchor='w',pady=(4,12))
         self.controls=[]; self.lists={}
         for s in SOURCES:
             row=ttk.LabelFrame(panel,text=s,padding=6); row.pack(fill='x',pady=3)
@@ -26,7 +26,7 @@ class App(tk.Tk):
         ttk.Label(row,text='결과 위치').pack(side='left');ttk.Entry(row,textvariable=self.output).pack(side='left',fill='x',expand=True,padx=8)
         b=ttk.Button(row,text='선택',command=self.choose_output);b.pack(side='left');self.controls.append(b)
         ttk.Checkbutton(panel,text='소스 사이의 확정 중복도 대표본 하나만 남김',variable=self.cross).pack(anchor='w')
-        ttk.Label(panel,text='조사 결과는 extension_inventory.csv와 Excel의 확장자조사 시트에 기록됩니다. 폰트·TXT·이미지도 이 단계에서는 그대로 집계합니다.').pack(anchor='w',pady=5)
+        ttk.Label(panel,text='해제본은 expanded/소스/작품명/ 바로 아래에 모입니다. 같은 이름은 __2 식으로 보존하고, 모든 확장자를 조사합니다.').pack(anchor='w',pady=5)
         actions=ttk.Frame(panel);actions.pack(fill='x',pady=6)
         for label,fn in [('전체 압축 해제·확장자 조사',self.analyze),('작업 불러오기',self.load),('원래 구조 복원',self.restore),('결과 열기',self.open_output)]:
             b=ttk.Button(actions,text=label,command=fn);b.pack(side='left',padx=3);self.controls.append(b)
