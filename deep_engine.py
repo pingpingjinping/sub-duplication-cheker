@@ -1,5 +1,5 @@
 """Leaf-level deduplication and reconstruction of arbitrarily nested subtitle ZIPs."""
-import collections, csv, hashlib, json, os, re, shutil, stat, subprocess, tempfile, zipfile
+import collections, csv, hashlib, json, os, re, shutil, stat, subprocess, tempfile, time, zipfile
 from pathlib import Path
 from engine import Engine as BaseEngine, SOURCES, SUBS, Cancelled, sha, safe_member, metadata, report, fs_path, file_size, ensure_dir, copy2_file, repair_legacy_zip_name, episode_hint, canonical_work_name
 
@@ -874,100 +874,161 @@ class Engine(BaseEngine):
             raise
 
     def clean_flat(self, run, extensions):
-        """Filter the flattened expanded tree and remove exact duplicates per work folder."""
+        """Filter the flattened expanded tree and remove exact duplicates per work folder.
+
+        A partially completed cleanup is resumable: records already deleted on disk are
+        reconciled from the saved deletion plan and the remaining deletions continue.
+        """
         if run.get('version')!=2:
             raise ValueError('작품 폴더별 해제 작업에서만 사용할 수 있습니다.')
-        if run.get('state')!='분석 완료':
-            raise ValueError('압축 해제·확장자 조사를 먼저 완료하세요.')
+        state=run.get('state')
+        if state not in ('분석 완료','정리 중','정리 미완료'):
+            raise ValueError('압축 해제·확장자 조사를 먼저 완료하거나 중단된 정리 작업을 불러오세요.')
         selected={str(x).lower() for x in extensions}
         if not selected:
             raise ValueError('남길 확장자를 하나 이상 선택하세요.')
         root=Path(run['run'])
-        self.log('선택 확장자 적용·작품 폴더별 SHA 중복 계산')
+        resuming=state in ('정리 중','정리 미완료')
 
-        # The earlier survey plan may contain global duplicate candidates.
-        # Final cleanup intentionally recalculates only within each immediate work folder.
-        for r in run['records']:
-            r['delete']=False;r['actual']=False;r['group']='';r['representative']='';r['reason']=''
+        def remove_with_retry(path):
+            """Delete a file, clearing Windows read-only attributes and retrying transient locks."""
+            last=None
+            for attempt in range(5):
+                try:
+                    os.unlink(fs_path(path))
+                    return
+                except FileNotFoundError:
+                    return
+                except PermissionError as e:
+                    last=e
+                    try:
+                        os.chmod(fs_path(path),stat.S_IREAD|stat.S_IWRITE)
+                    except OSError:
+                        pass
+                    if attempt<4:
+                        time.sleep(0.2)
+            raise last
 
-        keep_candidates=[]
-        for r in run['records']:
-            ext=Path(r['name']).suffix.lower() or '(없음)'
-            if ext not in selected:
-                r['delete']=True
-                r['reason']='선택되지 않은 확장자 제거'
-            else:
-                keep_candidates.append(r)
+        if not resuming:
+            self.log('선택 확장자 적용·작품 폴더별 SHA 중복 계산')
 
-        groups=collections.defaultdict(list)
-        for r in keep_candidates:
-            groups[(r['source'],r.get('work_folder','_root'),r['sha'])].append(r)
+            # The earlier survey plan may contain global duplicate candidates.
+            # Final cleanup intentionally recalculates only within each immediate work folder.
+            for r in run['records']:
+                r['delete']=False;r['actual']=False;r['group']='';r['representative']='';r['reason']=''
 
-        duplicate_groups=0
-        for (_,_,_), members in sorted(groups.items(), key=lambda x: str(x[0])):
-            if len(members)<2:continue
-            duplicate_groups+=1;gid=f'FOLDER-DUP-{duplicate_groups:06d}'
-            winner=sorted(members,key=lambda r:r['work'])[0]
-            representative=winner['work']
-            for r in members:
-                r['group']=gid;r['representative']=representative
-                if r is winner:
-                    r['reason']='작품 폴더 내 동일 SHA 대표본 보존'
+            keep_candidates=[]
+            for r in run['records']:
+                ext=Path(r['name']).suffix.lower() or '(없음)'
+                if ext not in selected:
+                    r['delete']=True
+                    r['reason']='선택되지 않은 확장자 제거'
                 else:
-                    r['delete']=True;r['reason']='같은 작품 폴더 내 SHA-256 동일'
+                    keep_candidates.append(r)
 
-        # Verify the flattened survey copy before deleting anything.
-        # A changed non-selected attachment is still going to be removed by explicit
-        # extension filtering, so it must not block subtitle cleanup. Kept files and
-        # SHA-based duplicate deletions remain strict.
-        changed_unselected=0
-        for r in run['records']:
-            self.check();p=root/r['work']
-            if not os.path.exists(fs_path(p)):
-                raise ValueError('해제 파일이 없습니다: '+str(p))
-            actual_sha=sha(p)
-            if actual_sha!=r['sha']:
-                if r['reason']=='선택되지 않은 확장자 제거':
-                    changed_unselected+=1
-                    r['sha_before_cleanup']=r['sha']
-                    r['sha']=actual_sha
-                    r['size']=file_size(p)
-                    r['reason']='선택되지 않은 확장자 제거 (작업본 내용 변경 감지)'
+            groups=collections.defaultdict(list)
+            for r in keep_candidates:
+                groups[(r['source'],r.get('work_folder','_root'),r['sha'])].append(r)
+
+            duplicate_groups=0
+            for (_,_,_), members in sorted(groups.items(), key=lambda x: str(x[0])):
+                if len(members)<2:continue
+                duplicate_groups+=1;gid=f'FOLDER-DUP-{duplicate_groups:06d}'
+                winner=sorted(members,key=lambda r:r['work'])[0]
+                representative=winner['work']
+                for r in members:
+                    r['group']=gid;r['representative']=representative
+                    if r is winner:
+                        r['reason']='작품 폴더 내 동일 SHA 대표본 보존'
+                    else:
+                        r['delete']=True;r['reason']='같은 작품 폴더 내 SHA-256 동일'
+
+            # Verify the flattened survey copy before deleting anything.
+            # A changed non-selected attachment is still going to be removed by explicit
+            # extension filtering, so it must not block subtitle cleanup. Kept files and
+            # SHA-based duplicate deletions remain strict.
+            changed_unselected=0
+            for r in run['records']:
+                self.check();p=root/r['work']
+                if not os.path.exists(fs_path(p)):
+                    raise ValueError('해제 파일이 없습니다: '+str(p))
+                actual_sha=sha(p)
+                if actual_sha!=r['sha']:
+                    if r['reason'].startswith('선택되지 않은 확장자 제거'):
+                        changed_unselected+=1
+                        r['sha_before_cleanup']=r['sha']
+                        r['sha']=actual_sha
+                        r['size']=file_size(p)
+                        r['reason']='선택되지 않은 확장자 제거 (작업본 내용 변경 감지)'
+                        continue
+                    raise ValueError('해제 파일 변경됨: '+str(p))
+            if changed_unselected:
+                self.log(f'비선택 확장자 작업본 변경 감지: {changed_unselected:,}개 / 어차피 제거 대상이라 계속 진행')
+
+            run['selected_extensions']=sorted(selected)
+            run['cleanup_mode']='flat_whitelist'
+        else:
+            previous=set(run.get('selected_extensions',[]))
+            if not previous:
+                raise ValueError('중단된 정리 작업에 선택 확장자 기록이 없습니다.')
+            if selected!=previous:
+                raise ValueError('중단된 정리는 처음 선택했던 확장자로만 재개할 수 있습니다: '+', '.join(sorted(previous)))
+
+            # The deletion plan was saved before deletion began. Reconcile records that
+            # were physically deleted after the last manifest save, then continue.
+            reconciled=0;changed_unselected=0
+            for r in run['records']:
+                self.check();p=root/r['work'];exists=os.path.exists(fs_path(p))
+                if r.get('actual'):
+                    if exists:
+                        raise ValueError('이미 삭제 처리된 파일이 다시 존재합니다: '+str(p))
                     continue
-                raise ValueError('해제 파일 변경됨: '+str(p))
-        if changed_unselected:
-            self.log(f'비선택 확장자 작업본 변경 감지: {changed_unselected:,}개 / 어차피 제거 대상이라 계속 진행')
+                if not exists:
+                    if r.get('delete'):
+                        r['actual']=True;reconciled+=1
+                        continue
+                    raise ValueError('보존할 파일이 없습니다: '+str(p))
+                actual_sha=sha(p)
+                if actual_sha!=r['sha']:
+                    if r.get('delete') and str(r.get('reason','')).startswith('선택되지 않은 확장자 제거'):
+                        changed_unselected+=1
+                        r['sha_before_cleanup']=r['sha']
+                        r['sha']=actual_sha
+                        r['size']=file_size(p)
+                        r['reason']='선택되지 않은 확장자 제거 (작업본 내용 변경 감지)'
+                        continue
+                    raise ValueError('해제 파일 변경됨: '+str(p))
+            self.log(f'중단된 정리 재개: 이미 삭제된 파일 {reconciled:,}개 복구 인식 / 남은 삭제 계속')
+            if changed_unselected:
+                self.log(f'비선택 확장자 작업본 변경 감지: {changed_unselected:,}개 / 어차피 제거 대상이라 계속 진행')
 
-        run['selected_extensions']=sorted(selected)
-        run['cleanup_mode']='flat_whitelist'
         run['state']='정리 중';self.save(run)
         journal=root/'deletion_journal.jsonl'
         try:
             for i,r in enumerate(run['records']):
                 self.check()
-                if not r['delete']:continue
+                if not r.get('delete') or r.get('actual'):continue
                 p=root/r['work']
                 with open(fs_path(journal),'a',encoding='utf-8') as j:
                     j.write(json.dumps({'path':r['work'],'reason':r['reason']},ensure_ascii=False)+'\\n')
                     j.flush();os.fsync(j.fileno())
-                os.unlink(fs_path(p));r['actual']=True
+                remove_with_retry(p);r['actual']=True
                 if (i+1)%100==0:self.save(run)
 
             # Empty work folders may remain. Avoid a second recursive filesystem walk here:
             # very long Windows paths are already represented safely by the manifest.
-
             for r in run['records']:
                 self.check();p=root/r['work']
                 exists=os.path.exists(fs_path(p))
-                if r['actual']:
+                if r.get('actual'):
                     if exists:raise ValueError('삭제 대상이 남아 있습니다: '+str(p))
                 else:
                     if not exists or sha(p)!=r['sha']:
                         raise ValueError('보존 파일 검증 실패: '+str(p))
 
             run['state']='정리 완료';self.save(run);report(run)
-            kept=sum(not r['actual'] for r in run['records'])
-            removed=sum(r['actual'] for r in run['records'])
+            kept=sum(not r.get('actual') for r in run['records'])
+            removed=sum(bool(r.get('actual')) for r in run['records'])
             self.log(f'정리 완료: 보존 {kept:,}개 / 제거 {removed:,}개 / ZIP 재생성 없음')
             return run
         except Exception:
