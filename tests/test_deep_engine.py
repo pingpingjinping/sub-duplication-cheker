@@ -101,4 +101,25 @@ class DeepTests(unittest.TestCase):
         self.assertEqual(len(r['records']),6)
         self.assertTrue((self.a/'작품/bundle.zip').exists())
 
+    def test_extracts_into_immediate_work_folder_and_flattens_zip_paths(self):
+        self.put(self.a,'작품A/pack1.zip',zb([
+            ('inside/01.smi',b'first'),
+            ('nested.zip',zb([('deep/02.ass',b'second')]))
+        ]))
+        self.put(self.a,'작품A/pack2.zip',zb([('other/01.smi',b'different')]))
+        self.put(self.a,'작품A/plain.srt',b'plain')
+        self.put(self.a,'작품B/pack.zip',zb([('folder/03.smi',b'third')]))
+        r=self.run_analysis()
+        expanded=Path(r['run'])/'expanded'/SOURCES[0]
+        a=expanded/'작품A'; b=expanded/'작품B'
+        self.assertEqual(
+            sorted(p.name for p in a.iterdir() if p.is_file()),
+            ['01.smi','01__2.smi','02.ass','plain.srt']
+        )
+        self.assertEqual(sorted(p.name for p in b.iterdir() if p.is_file()),['03.smi'])
+        self.assertFalse(any(p.is_dir() for p in a.iterdir()))
+        self.assertFalse(any(p.suffix.lower()=='.zip' for p in a.iterdir()))
+        self.assertEqual({x.get('work_folder') for x in r['records'] if x['source']==SOURCES[0]},
+                         {'작품A','작품B'})
+
 if __name__=='__main__':unittest.main()
