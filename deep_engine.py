@@ -208,19 +208,26 @@ class Engine(BaseEngine):
                 if ext=='.zip':
                     before=len(run['records'])
                     try:
+                        with zipfile.ZipFile(fs_path(new)) as z:
+                            infos=[x for x in z.infolist() if not x.is_dir()]
+                            if not infos:
+                                raise ValueError('빈 ZIP')
+                            if any(x.flag_bits&1 for x in infos):
+                                raise ValueError('암호화 ZIP')
                         tree=self.expand(run,r,new,r['rel'],[],counter,[0],0,r.get('work_folder','_root'),temp_root)
                         added=len(run['records'])-before
                         if tree.get('kind')=='zip' and added>0:
                             zip_expanded+=1;action=f'ZIP 재귀 해제 + {added:,}개 추가'
                             r['archive_extracted']=True
                         else:
-                            zip_failed+=1;action='ZIP 보존(빈 ZIP 또는 해제 불가)'
-                            r['archive_extracted']=False
+                            raise ValueError('해제 가능한 내부 파일 없음')
                     except Cancelled:raise
                     except Exception as e:
-                        zip_failed+=1;action='ZIP 보존(해제 실패)'
+                        # Keep only the renamed original archive; do not duplicate it on failure.
+                        del run['records'][before:]
+                        zip_failed+=1;action='ZIP 보존(해제 불가)'
                         r['archive_extracted']=False
-                        r['extension_detection']=reason+' / 해제 실패: '+str(e)
+                        r['extension_detection']=reason+' / 해제 보류: '+str(e)
 
                 rows.append([r['source'],r.get('work_folder',''),old_work,kind,ext,action,r['work'],r['extension_detection']])
                 if i%100==0:self.log(f'무확장자 판별: {i:,}/{len(targets):,}')
