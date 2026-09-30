@@ -417,6 +417,10 @@ def report(run):
         rows=[['소스','작품 폴더','원래 작업 경로','판별 종류','판별 확장자','처리','현재 작업 경로','판별 근거']]
         rows += [[x.get('source',''),x.get('work_folder',''),x.get('old_path',''),x.get('kind',''),x.get('detected_extension',''),x.get('action',''),x.get('new_path',''),x.get('reason','')] for x in run.get('extensionless_detection',[])]
         sheets.append(('무확장자판별',rows))
+    if run.get('remaining_archive_extraction') is not None:
+        rows=[['소스','작품 폴더','압축파일 작업 경로','압축파일명','결과','추가 파일 수','오류']]
+        rows += [[x.get('source',''),x.get('work_folder',''),x.get('archive_path',''),x.get('archive_name',''),x.get('result',''),x.get('added_files',0),x.get('error','')] for x in run.get('remaining_archive_extraction',[])]
+        sheets.append(('남은압축해제',rows))
     if run.get('version')==2 and run.get('cleanup_mode')!='flat_whitelist':
         sheets.append(('ZIP재구성',[['원래 ZIP 경로','처리 결과']]+[[x['path'],x['result']] for x in run.get('containers',[])]))
     elif run.get('cleanup_mode')=='flat_whitelist':
