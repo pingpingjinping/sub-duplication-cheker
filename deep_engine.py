@@ -1,5 +1,5 @@
 """Leaf-level deduplication and reconstruction of arbitrarily nested subtitle ZIPs."""
-import collections, csv, hashlib, json, os, re, shutil, stat, tempfile, zipfile
+import collections, csv, hashlib, json, os, re, shutil, stat, subprocess, tempfile, zipfile
 from pathlib import Path
 from engine import Engine as BaseEngine, SOURCES, Cancelled, sha, safe_member, metadata, report, fs_path, file_size, ensure_dir, copy2_file
 
@@ -251,6 +251,179 @@ class Engine(BaseEngine):
         self.save(run);report(run)
         counts=', '.join(f'{k} {v:,}' for k,v in sorted(kind_counts.items()))
         self.log(f'무확장자 판별 완료: {counts} / ZIP 자동 해제 {zip_expanded:,}개 / ZIP 보존 {zip_failed:,}개 / 판별 불가·무확장 {unknown:,}개')
+        return run
+
+    def remaining_archive_candidates(self, run):
+        """Archives that still need external extraction. Split ZIP/font bundles are intentionally skipped."""
+        top_exts={'.7z','.rar','.egg','.alz'}
+        out=[]
+        for r in run.get('records',[]):
+            ext=Path(r.get('name','')).suffix.lower()
+            if ext not in top_exts or r.get('actual') or r.get('external_archive_extracted'):
+                continue
+            if re.search(r'폰트|fonts?',r.get('name',''),re.I):
+                r['external_archive_skip']='font'
+                continue
+            out.append(r)
+        return out
+
+    def find_bandizip(self, explicit=None):
+        candidates=[]
+        if explicit:candidates.append(str(explicit))
+        found=shutil.which('bz.exe') or shutil.which('bz')
+        if found:candidates.append(found)
+        for env in ('ProgramFiles','ProgramFiles(x86)','LOCALAPPDATA'):
+            base=os.environ.get(env)
+            if base:
+                candidates.append(str(Path(base)/'Bandizip'/'bz.exe'))
+        seen=set()
+        for p in candidates:
+            if not p or p in seen:continue
+            seen.add(p)
+            if os.path.isfile(p):return p
+        return ''
+
+    def _bandizip_extract(self, executable, archive, destination):
+        executable=self.find_bandizip(executable)
+        if not executable:
+            raise ValueError('Bandizip bz.exe를 찾지 못했습니다.')
+        archive=str(Path(archive).resolve());destination=str(Path(destination).resolve())
+        flags=getattr(subprocess,'CREATE_NO_WINDOW',0)
+        common={'stdout':subprocess.PIPE,'stderr':subprocess.STDOUT,'text':True,
+                'encoding':'utf-8','errors':'replace','creationflags':flags}
+        test=subprocess.run([executable,'t','-consolemode:utf8',archive],**common)
+        if test.returncode!=0:
+            msg=(test.stdout or '').strip()[-1200:]
+            raise ValueError('압축 테스트 실패'+(': '+msg if msg else ''))
+        extract=subprocess.run([executable,'x','-y','-aoa','-consolemode:utf8',f'-o:{destination}',archive],**common)
+        if extract.returncode!=0:
+            msg=(extract.stdout or '').strip()[-1200:]
+            raise ValueError('압축 해제 실패'+(': '+msg if msg else ''))
+
+    def _register_external_leaf(self, run, parent, source_file, member):
+        root=Path(run['run']);work=parent.get('work_folder','_root')
+        name=Path(member).name
+        dest=self.leaf_destination(root,parent['source'],work,name)
+        copy2_file(source_file,dest)
+        ep=parent.get('episode','')
+        if not ep:
+            m=re.search(r'(\d+)\s*(?:화|회)|(?:ep|episode)[ ._-]*(\d+)',member,re.I)
+            ep=m.group(0) if m else ''
+        rel=parent.get('rel',parent['name'])+'!/'+member.replace('\\','/')
+        r={'source':parent['source'],'rel':rel,'name':dest.name,'size':file_size(dest),'sha':sha(dest),
+           'title':parent.get('title',''),'episode':ep,'uploader':parent.get('uploader',''),
+           'season':parent.get('season',''),'origin':{'archive':str(root/parent['work']),'member':member},
+           'signature':'','inner_names':[],'error':'','delete':False,'group':'',
+           'representative':'','reason':'','actual':False,'work':str(dest.relative_to(root)),
+           'work_folder':work,'external_archive_depth':parent.get('external_archive_depth',0)+1}
+        run['records'].append(r)
+        return r
+
+    def extract_remaining_archives(self, run, bandizip=None, extractor=None):
+        """Use Bandizip for RAR/7z/EGG/ALZ, flatten leaves into each work folder, and register them."""
+        if run.get('version')!=2:
+            raise ValueError('작품 폴더별 해제 작업에서만 사용할 수 있습니다.')
+        if run.get('state')!='분석 완료':
+            raise ValueError('완료된 분석 작업에서만 남은 압축파일을 해제할 수 있습니다.')
+        root=Path(run['run'])
+        queue=list(self.remaining_archive_candidates(run))
+        if not queue:
+            self.log('해제할 남은 압축파일이 없습니다.')
+            return run
+        executable='' if extractor else self.find_bandizip(bandizip)
+        if not extractor and not executable:
+            raise ValueError('Bandizip bz.exe를 찾지 못했습니다. 설치 경로의 bz.exe를 선택하세요.')
+
+        initial=len(queue);success=0;failed=0;added_total=0;skipped_nested=0
+        rows=[];seen=set()
+        nested_exts={'.zip','.7z','.rar','.egg','.alz'}
+        self.log(f'남은 압축파일 해제 시작: {initial:,}개')
+        while queue:
+            self.check();r=queue.pop(0)
+            work_key=r.get('work','')
+            if not work_key or work_key in seen:continue
+            seen.add(work_key)
+            depth=int(r.get('external_archive_depth',0))
+            archive=root/work_key
+            display=str(work_key).replace('\\','/')
+            if depth>8:
+                skipped_nested+=1
+                r['external_archive_error']='재귀 깊이 제한 초과'
+                rows.append([r['source'],r.get('work_folder',''),display,r['name'],'건너뜀',0,'재귀 깊이 제한 초과'])
+                continue
+            if re.search(r'폰트|fonts?',r.get('name',''),re.I):
+                r['external_archive_skip']='font'
+                rows.append([r['source'],r.get('work_folder',''),display,r['name'],'폰트 압축 제외',0,''])
+                continue
+            if not os.path.exists(fs_path(archive)):
+                failed+=1;r['external_archive_error']='파일 없음'
+                rows.append([r['source'],r.get('work_folder',''),display,r['name'],'실패',0,'파일 없음'])
+                continue
+            if sha(archive)!=r['sha']:
+                raise ValueError('해제 대상 압축파일이 변경되었습니다: '+str(archive))
+
+            before=len(run['records']);created=[]
+            temp=Path(tempfile.mkdtemp(prefix='subtitle-bz-'))
+            try:
+                if extractor:
+                    extractor(archive,temp)
+                else:
+                    self._bandizip_extract(executable,archive,temp)
+                files=sorted((p for p in temp.rglob('*') if p.is_file()),key=lambda p:p.as_posix().casefold())
+                if not files:raise ValueError('압축 해제 결과가 비어 있습니다.')
+                total=sum(p.stat().st_size for p in files)
+                if total>2*1024**3:raise ValueError('압축 해제 결과 2GiB 제한 초과')
+                for p in files:
+                    self.check()
+                    member=p.relative_to(temp).as_posix()
+                    nr=self._register_external_leaf(run,r,p,member)
+                    created.append(nr)
+                r['external_archive_extracted']=True
+                r.pop('external_archive_error',None)
+                r['external_archive_added']=len(created)
+                success+=1;added_total+=len(created)
+                rows.append([r['source'],r.get('work_folder',''),display,r['name'],'성공',len(created),''])
+                for nr in created:
+                    ext=Path(nr['name']).suffix.lower()
+                    if ext in nested_exts:
+                        if re.search(r'폰트|fonts?',nr['name'],re.I):
+                            nr['external_archive_skip']='font';skipped_nested+=1
+                        else:
+                            queue.append(nr)
+                self.log(f'압축 해제: {r["source"]}/{r.get("work_folder","")} / {r["name"]} → {len(created):,}개')
+            except Cancelled:
+                for nr in created:
+                    try:os.unlink(fs_path(root/nr['work']))
+                    except FileNotFoundError:pass
+                del run['records'][before:]
+                raise
+            except Exception as e:
+                for nr in created:
+                    try:os.unlink(fs_path(root/nr['work']))
+                    except FileNotFoundError:pass
+                del run['records'][before:]
+                failed+=1;r['external_archive_error']=str(e)
+                rows.append([r['source'],r.get('work_folder',''),display,r['name'],'실패',0,str(e)])
+                self.log(f'압축 해제 실패: {r["name"]} / {e}')
+            finally:
+                shutil.rmtree(fs_path(temp),ignore_errors=True)
+
+        # Recalculate survey groups after newly extracted leaves are registered.
+        for r in run['records']:
+            r['delete']=False;r['actual']=False;r['group']='';r['representative']='';r['reason']=''
+        self.plan(run)
+        run['remaining_archive_extraction']=[
+            {'source':x[0],'work_folder':x[1],'archive_path':x[2],'archive_name':x[3],
+             'result':x[4],'added_files':x[5],'error':x[6]} for x in rows
+        ]
+        run['remaining_archives_scanned']=True
+        out=root/'remaining_archive_extraction.csv'
+        with open(fs_path(out),'w',encoding='utf-8-sig',newline='') as fh:
+            w=csv.writer(fh)
+            w.writerow(['소스','작품 폴더','압축파일 작업 경로','압축파일명','결과','추가 파일 수','오류'])
+            w.writerows(rows)
+        self.save(run);report(run)
+        self.log(f'남은 압축파일 해제 완료: 성공 {success:,}개 / 실패 {failed:,}개 / 추가 파일 {added_total:,}개 / 폰트·깊이 제외 {skipped_nested:,}개')
         return run
 
     def clean_flat(self, run, extensions):
