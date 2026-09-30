@@ -28,7 +28,7 @@ class App(tk.Tk):
         ttk.Checkbutton(panel,text='소스 사이의 확정 중복도 대표본 하나만 남김',variable=self.cross).pack(anchor='w')
         ttk.Label(panel,text='해제본은 expanded/소스/작품명/ 바로 아래에 모입니다. 같은 이름은 __2 식으로 보존하고, 모든 확장자를 조사합니다.').pack(anchor='w',pady=5)
         actions=ttk.Frame(panel);actions.pack(fill='x',pady=6)
-        for label,fn in [('전체 압축 해제·확장자 조사',self.analyze),('선택 확장자 적용·중복 정리',self.choose_extensions_and_clean),('작업 불러오기',self.load),('원래 구조 복원',self.restore),('결과 열기',self.open_output)]:
+        for label,fn in [('전체 압축 해제·확장자 조사',self.analyze),('무확장자 자막 판별',self.detect_extensionless),('선택 확장자 적용·중복 정리',self.choose_extensions_and_clean),('작업 불러오기',self.load),('원래 구조 복원',self.restore),('결과 열기',self.open_output)]:
             b=ttk.Button(actions,text=label,command=fn);b.pack(side='left',padx=3);self.controls.append(b)
         ttk.Button(actions,text='중지',command=self.stop.set).pack(side='right')
         self.bar=ttk.Progressbar(panel,mode='indeterminate');self.bar.pack(fill='x',pady=4)
@@ -72,11 +72,24 @@ class App(tk.Tk):
             self.events.put(('run',data))
             return data
         self.worker(automatic)
+    def detect_extensionless(self):
+        if not self.run_data or self.run_data.get('state')!='분석 완료':
+            messagebox.showinfo('판별','먼저 전체 압축 해제·확장자 조사를 완료하거나 작업을 불러오세요.')
+            return
+        n=sum(not Path(r['name']).suffix for r in self.run_data.get('records',[]))
+        if not n:
+            messagebox.showinfo('판별','확장자 없는 파일이 없습니다.');return
+        if messagebox.askyesno('무확장자 자막 판별',f'확장자 없는 파일 {n:,}개만 내용을 읽어 SMI/SRT/ASS/SSA/VTT/SUB/IDX 형식을 판별할까요?\n전체 ZIP 재해제는 하지 않습니다.'):
+            self.worker(lambda e:e.detect_extensionless(self.run_data))
+
     def choose_extensions_and_clean(self):
         if not self.run_data or self.run_data.get('state')!='분석 완료':
             messagebox.showinfo('정리','먼저 전체 압축 해제·확장자 조사를 완료하거나 작업을 불러오세요.')
             return
         records=self.run_data.get('records',[])
+        if any(not Path(r['name']).suffix for r in records) and not self.run_data.get('extensionless_scanned'):
+            messagebox.showinfo('정리','확장자 없는 파일이 남아 있습니다. 먼저 `무확장자 자막 판별`을 실행하세요.')
+            return
         if not records:
             messagebox.showinfo('정리','조사된 파일이 없습니다.');return
         counts={}
