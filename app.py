@@ -2,7 +2,8 @@ import argparse, json, os, queue, subprocess, sys, threading, traceback
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from engine import Engine, Cancelled, SOURCES
+from engine import Cancelled, SOURCES
+from deep_engine import Engine
 
 class App(tk.Tk):
     def __init__(self):
@@ -14,7 +15,7 @@ class App(tk.Tk):
         style.configure('Header.TLabel',font=('Malgun Gothic',17,'bold'))
         panel=ttk.Frame(self,padding=16); panel.pack(fill='both',expand=True)
         ttk.Label(panel,text='자막 중복 정리',style='Header.TLabel').pack(anchor='w')
-        ttk.Label(panel,text='세 소스를 한 작업 공간에서 비교합니다. 원본을 보존하고 복사본만 정리합니다.').pack(anchor='w',pady=(4,12))
+        ttk.Label(panel,text='시작하면 내부 ZIP까지 비교하고 복사본의 확정 중복을 자동 정리합니다. 원본은 보존합니다.').pack(anchor='w',pady=(4,12))
         self.controls=[]; self.lists={}
         for s in SOURCES:
             row=ttk.LabelFrame(panel,text=s,padding=6); row.pack(fill='x',pady=3)
@@ -25,9 +26,9 @@ class App(tk.Tk):
         ttk.Label(row,text='결과 위치').pack(side='left');ttk.Entry(row,textvariable=self.output).pack(side='left',fill='x',expand=True,padx=8)
         b=ttk.Button(row,text='선택',command=self.choose_output);b.pack(side='left');self.controls.append(b)
         ttk.Checkbutton(panel,text='소스 사이의 확정 중복도 대표본 하나만 남김',variable=self.cross).pack(anchor='w')
-        ttk.Label(panel,text='ZIP은 내부 파일명과 압축 방식이 달라도 전체 내용이 같으면 중복입니다. 내용 차이·오배치 의심은 보존합니다.').pack(anchor='w',pady=5)
+        ttk.Label(panel,text='내부 ZIP의 개별 자막을 비교합니다. 싱크·문자·인코딩이 다르면 보존합니다.').pack(anchor='w',pady=5)
         actions=ttk.Frame(panel);actions.pack(fill='x',pady=6)
-        for label,fn in [('1. 분석',self.analyze),('2. 확정 중복 정리·ZIP 생성',self.apply),('작업 불러오기',self.load),('삭제 파일 복원',self.restore),('결과 열기',self.open_output)]:
+        for label,fn in [('분석·자동 정리 시작',self.analyze),('미적용 분석 정리',self.apply),('작업 불러오기',self.load),('원래 구조 복원',self.restore),('결과 열기',self.open_output)]:
             b=ttk.Button(actions,text=label,command=fn);b.pack(side='left',padx=3);self.controls.append(b)
         ttk.Button(actions,text='중지',command=self.stop.set).pack(side='right')
         self.bar=ttk.Progressbar(panel,mode='indeterminate');self.bar.pack(fill='x',pady=4)
@@ -66,7 +67,12 @@ class App(tk.Tk):
     def analyze(self):
         if not any(self.inputs.values()):messagebox.showinfo('입력','원본 폴더나 ZIP을 선택하세요.');return
         inputs={s:list(ps) for s,ps in self.inputs.items()}; output=self.output.get();cross=self.cross.get()
-        self.worker(lambda e:e.analyze(inputs,output,cross))
+        def automatic(e):
+            data=e.analyze(inputs,output,cross)
+            self.events.put(('run',data))
+            e.apply(data)
+            return data
+        self.worker(automatic)
     def apply(self):
         if not self.run_data or self.run_data['state']!='분석 완료':messagebox.showinfo('분석','먼저 분석을 완료하세요.');return
         n=sum(r['delete'] for r in self.run_data['records']);size=sum(r['size'] for r in self.run_data['records'] if r['delete'])/1024**2
@@ -85,7 +91,9 @@ class App(tk.Tk):
             data['run']=str(Path(p).resolve().parent)
             for r in data['records']:
                 if r['source'] not in SOURCES:raise ValueError('소스 오류')
-                safe_member(r['rel'])
+                for part in r['rel'].split('!/'):
+                    safe_member(part)
+                if r.get('work'):safe_member(r['work'])
             self.run_data=data;self.refresh()
         except Exception as e:messagebox.showerror('불러오기 실패',str(e))
     def refresh(self):
@@ -108,7 +116,9 @@ class App(tk.Tk):
         while True:
             try:kind,value=self.events.get_nowait()
             except queue.Empty:break
-            if kind=='log':
+            if kind=='run':
+                self.run_data=value
+            elif kind=='log':
                 self.log_widget.insert('end',value+'\n');self.log_widget.see('end');self.status.set(value)
             else:
                 self.busy=False;self.bar.stop()
