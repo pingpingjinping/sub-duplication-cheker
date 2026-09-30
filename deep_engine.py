@@ -683,10 +683,22 @@ class Engine(BaseEngine):
                 ambiguous+=1
                 rows.append([source,r.get('work_folder',''),r['name'],' | '.join(names),'복수 원본명: 보존',' | '.join(origins),r.get('sha','')])
                 continue
-            desired=names[0]
+            original_desired=names[0]
+            desired=original_desired
+            # If the original source itself had no extension, do not undo an extension that
+            # was already identified from subtitle content during the extensionless scan.
+            subtitle_exts=set(SUBS)|{'.jmk'}
+            detected_ext=str(r.get('detected_extension','')).lower()
+            current_ext=Path(r.get('name','')).suffix.lower()
+            keep_ext=detected_ext if detected_ext in subtitle_exts else (current_ext if current_ext in subtitle_exts else '')
+            if not Path(desired).suffix and keep_ext:
+                desired=desired+keep_ext
             if desired==r['name']:
                 already+=1
-                rows.append([source,r.get('work_folder',''),r['name'],desired,'이미 동일',' | '.join(origins),r.get('sha','')])
+                result='이미 동일'
+                if desired!=original_desired:
+                    result=f'이미 동일 (원본 무확장, 판별 확장자 {keep_ext} 유지)'
+                rows.append([source,r.get('work_folder',''),r['name'],original_desired,result,' | '.join(origins),r.get('sha','')])
                 continue
             if not os.path.exists(fs_path(old)) or sha(old)!=r['sha']:
                 raise ValueError('expanded 파일이 변경되었습니다: '+str(old))
@@ -704,7 +716,10 @@ class Engine(BaseEngine):
             r['original_name_recovered_from']=before
             r['original_name_sources']=origins
             renamed+=1
-            rows.append([source,r.get('work_folder',''),before,dest.name,'복구',' | '.join(origins),r.get('sha','')])
+            result='복구'
+            if desired!=original_desired:
+                result=f'복구 (원본 무확장, 판별 확장자 {keep_ext} 유지)'
+            rows.append([source,r.get('work_folder',''),before,original_desired,result,' | '.join(origins),r.get('sha','')])
 
         run['original_name_recovery']=[
             {'source':x[0],'work_folder':x[1],'old_name':x[2],'original_name':x[3],
